@@ -1,4 +1,7 @@
-"""Planner: decide what needs conversion based on scan vs DB."""
+"""Planner: decide what needs conversion based on scan vs DB.
+
+Considers file attributes and encoder settings so we only re-encode when needed.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,6 +22,10 @@ class PlanItem:
     rel_path: Path
     output_rel: Path
     vbr_quality: int = 5
+    encoder: str = "libfdk_aac"
+    size: int | None = None
+    mtime_ns: int | None = None
+    flac_md5: str | None = None
 
 
 def plan_changes(
@@ -26,6 +33,7 @@ def plan_changes(
     db_index: dict[str, "sqlite3.Row"],
     *,
     vbr_quality: int = 5,
+    encoder: str = "libfdk_aac",
 ) -> List[PlanItem]:
     import sqlite3  # local import to avoid hard dependency at import time
 
@@ -43,6 +51,7 @@ def plan_changes(
                 or prev["mtime_ns"] != sf.mtime_ns
                 or (prev["flac_md5"] and sf.flac_md5 and prev["flac_md5"] != sf.flac_md5)
                 or prev["vbr_quality"] != vbr_quality
+                or prev["encoder"] != encoder
             )
             decision = "convert" if changed else "skip"
             reason = "changed" if changed else "unchanged"
@@ -53,5 +62,9 @@ def plan_changes(
             rel_path=sf.rel_path,
             output_rel=out_rel,
             vbr_quality=vbr_quality,
+            encoder=encoder,
+            size=sf.size,
+            mtime_ns=sf.mtime_ns,
+            flac_md5=sf.flac_md5,
         ))
     return plan

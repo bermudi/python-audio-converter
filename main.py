@@ -22,6 +22,7 @@ from pac.metadata import copy_tags_flac_to_mp4  # noqa: E402
 from pac import db as pac_db  # noqa: E402
 from pac.scanner import scan_flac_files  # noqa: E402
 from pac.scheduler import WorkerPool  # noqa: E402
+from pac.planner import plan_changes  # noqa: E402
 
 
 EXIT_OK = 0
@@ -140,7 +141,46 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int) -> int:
     return 0
 
 
-def cmd_convert_dir(src_dir: str, out_dir: str, *, tvbr: int, workers: int | None) -> int:
+def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int) -> int:
+    """Encode using the preselected backend to keep DB planning consistent.
+
+    encoder: one of "libfdk_aac", "qaac", "fdkaac".
+    tvbr: qaac quality scale (e.g., 96 ~ 256 kbps typical).
+    vbr: libfdk_aac/fdkaac quality/mode (1..5; 5 ~ 256 kbps typical).
+    """
+    if encoder == "libfdk_aac":
+        cmd = build_ffmpeg_cmd(src_p, dest_p, vbr_quality=vbr)
+        rc = run_ffmpeg(cmd)
+        if rc != 0:
+            return rc
+    elif encoder == "qaac":
+        rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr)
+        if rc != 0:
+            return rc
+    elif encoder == "fdkaac":
+        rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=vbr)
+        if rc != 0:
+            return rc
+    else:  # pragma: no cover - defensive
+        print(f"Unknown encoder: {encoder}")
+        return 1
+
+    try:
+        copy_tags_flac_to_mp4(src_p, dest_p)
+    except Exception as e:  # pragma: no cover
+        print(f"Warning: metadata copy failed: {e}")
+    return 0
+
+
+def cmd_convert_dir(
+    src_dir: str,
+    out_dir: str,
+    *,
+    tvbr: int,
+    vbr: int,
+    workers: int | None,
+    hash_streaminfo: bool,
+) -> int:
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -153,40 +193,70 @@ def cmd_convert_dir(src_dir: str, out_dir: str, *, tvbr: int, workers: int | Non
         print("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
         return EXIT_PREFLIGHT_FAILED
 
-    files = scan_flac_files(src_root, compute_flac_md5=False)
+    # Pick encoder once for the whole run (stable planning)
+    selected_encoder = "libfdk_aac" if st.has_libfdk_aac else ("qaac" if st_qaac.available else "fdkaac")
+    quality_for_db = tvbr if selected_encoder == "qaac" else vbr
+
+    # Scan
+    files = scan_flac_files(src_root, compute_flac_md5=hash_streaminfo)
     if not files:
         print("No .flac files found")
         return EXIT_OK
+
+    # DB and plan
+    conn = pac_db.connect()
+    try:
+        db_idx = pac_db.fetch_files_index(conn)
+        plan = plan_changes(files, db_idx, vbr_quality=quality_for_db, encoder=selected_encoder)
+    finally:
+        pass
+
+    to_convert = [pi for pi in plan if pi.decision == "convert"]
+    unchanged = [pi for pi in plan if pi.decision == "skip"]
 
     max_workers = workers or (os.cpu_count() or 1)
     pool = WorkerPool(max_workers=max_workers)
 
     converted = 0
-    skipped = 0
     failed = 0
 
     futures = []
-    for sf in files:
-        dest_path = out_root / sf.rel_path.with_suffix(".m4a")
+    dest_paths: dict[int, tuple[Path, Path]] = {}
+    for idx, pi in enumerate(to_convert):
+        dest_path = out_root / pi.output_rel
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        if dest_path.exists():
-            skipped += 1
-            continue
-        futures.append(
-            pool.submit(_encode_one, sf.path, dest_path, tvbr)
-        )
+        futures.append(pool.submit(_encode_one_selected, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr))
+        dest_paths[idx] = (pi.src_path, dest_path)
 
-    for fut in futures:
+    # Collect results and update DB for successes
+    for i, fut in enumerate(futures):
         rc = fut.result()
         if rc == 0:
             converted += 1
+            pi = to_convert[i]
+            pac_db.upsert_file(
+                conn,
+                src_path=str(pi.src_path),
+                rel_path=str(pi.rel_path),
+                size=pi.size or 0,
+                mtime_ns=pi.mtime_ns or 0,
+                flac_md5=pi.flac_md5,
+                output_rel=str(pi.output_rel),
+                encoder=pi.encoder,
+                vbr_quality=pi.vbr_quality,
+                container="m4a",
+            )
+            conn.commit()
         else:
             failed += 1
 
     pool.shutdown()
+    conn.close()
 
-    total = len(files)
-    print(f"Scanned: {total} | Converted: {converted} | Skipped (exists): {skipped} | Failed: {failed}")
+    total = len(plan)
+    print(
+        f"Planned: {total} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)} | Converted: {converted} | Failed: {failed}"
+    )
     return EXIT_OK if failed == 0 else EXIT_WITH_FILE_ERRORS
 
 
@@ -228,6 +298,25 @@ def main(argv: list[str] | None = None) -> int:
         default=96,
         help="qaac true VBR value targeting around 256 kbps (default: 96)",
     )
+    p_dir.add_argument(
+        "--vbr",
+        type=int,
+        default=5,
+        help="libfdk_aac/fdkaac VBR quality/mode 1..5 (default: 5 ~ 256 kbps)",
+    )
+    p_dir.add_argument(
+        "--hash",
+        dest="hash_streaminfo",
+        action="store_true",
+        help="Compute and store FLAC STREAMINFO MD5 for change detection (slower)",
+    )
+    p_dir.add_argument(
+        "--no-hash",
+        dest="hash_streaminfo",
+        action="store_false",
+        help="Disable FLAC STREAMINFO MD5 (use size+mtime only)",
+    )
+    p_dir.set_defaults(hash_streaminfo=False)
 
     args = p.parse_args(argv)
     if args.cmd == "preflight":
@@ -237,7 +326,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "convert":
         return cmd_convert(args.src, args.dest, args.tvbr)
     if args.cmd == "convert-dir":
-        return cmd_convert_dir(args.in_dir, args.out_dir, tvbr=args.tvbr, workers=args.workers)
+        return cmd_convert_dir(
+            args.in_dir,
+            args.out_dir,
+            tvbr=args.tvbr,
+            vbr=args.vbr,
+            workers=args.workers,
+            hash_streaminfo=args.hash_streaminfo,
+        )
     p.error("unknown command")
     return 1
 

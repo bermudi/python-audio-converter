@@ -20,21 +20,21 @@ Owner: daniel
 
 ## 2. System Overview
 
-- High-level flow: Source scan → Change detection (vs local state DB) → Work queue → Parallel transcodes (FFmpeg + libfdk_aac) → Metadata/cover propagation → Output to target path → State DB update → Report.
+- High-level flow: Source scan → Change detection (vs local state DB) → Work queue → Parallel transcodes (AAC encoder backend with fallback: ffmpeg+libfdk_aac → qaac(pipe) → fdkaac(pipe)) → Metadata/cover propagation → Output to target path → State DB update → Report.
 - Components:
   - Scanner: Walks source directory, computes identifiers for change detection (see §5.2).
   - State DB: Local SQLite tracking previously converted items and parameters.
   - Scheduler: Batches and runs conversion jobs in parallel with backpressure.
-  - Encoder Backend: FFmpeg invocation with libfdk_aac.
+  - Encoder Backend: Preferred FFmpeg+libfdk_aac. Fallbacks: FFmpeg decode piped to `qaac` (true VBR) then to `fdkaac`.
   - Metadata Copier: Ensures tags and cover art are preserved (1:1 when feasible).
   - GUI: Desktop app for configuring paths, running scans, starting/stopping jobs, and viewing progress/logs.
-- External dependencies: FFmpeg with libfdk_aac enabled; system-level install on Linux.
+- External dependencies: FFmpeg (required). Encoders: libfdk_aac (preferred) via FFmpeg; `qaac` and `fdkaac` supported as fallbacks. System-level install on Linux.
 
 ## 3. Functional Requirements
 
 FR-1: The system shall mirror a source FLAC library to an AAC (M4A) destination, preserving relative directory structure and file base names, changing only the extension to .m4a.
 
-FR-2: The system shall use FFmpeg with libfdk_aac to encode AAC. If libfdk_aac is unavailable, the application shall display a clear error with remediation guidance and shall not proceed with alternative encoders automatically.
+FR-2: The system shall encode AAC using this ordered backend selection: (1) FFmpeg with libfdk_aac; (2) FFmpeg decode piped to `qaac`; (3) FFmpeg decode piped to `fdkaac`. If none are available, preflight shall fail with clear remediation guidance.
 
 FR-3: The system shall target a VBR mode that yields approximately 256 kbps for typical stereo content. The VBR quality level shall be configurable; default quality shall be chosen to approximate ~256 kbps on average across a corpus. The system shall record the chosen quality in the state DB.
 
@@ -83,7 +83,7 @@ NFR-6 Security/Privacy: No external telemetry. No upload of audio content. Store
 
 ## 5. Constraints and Assumptions
 
-5.1 Licensing: libfdk_aac is non‑free in some contexts. The app shall not bundle libfdk_aac; it shall require a system FFmpeg build with libfdk_aac enabled. Documentation shall provide install guidance.
+5.1 Licensing: libfdk_aac availability varies and may be non‑free in some contexts. The app shall not bundle any encoder. It shall rely on system tools: FFmpeg (required), and optionally `qaac`/`fdkaac`. Documentation shall provide install guidance for each.
 
 5.2 State DB: SQLite located at a standard path (e.g., `~/.local/share/python-audio-converter/state.sqlite`). Schema (initial):
 - files(id, src_path TEXT PK, rel_path TEXT, size BIGINT, mtime BIGINT, sha256 TEXT NULL, duration_ms INT NULL,
@@ -92,7 +92,7 @@ NFR-6 Security/Privacy: No external telemetry. No upload of audio content. Store
 - file_runs(id PK, run_id FK, src_path, status ENUM('converted','skipped','failed'), reason TEXT, elapsed_ms INT)
 Assumptions: hashing can be enabled/disabled (performance tradeoff). When disabled, size+mtime are used.
 
-5.3 Environment: Python 3.12. System FFmpeg with libfdk_aac. GUI via Qt (PySide6) on Linux.
+5.3 Environment: Python 3.12. System FFmpeg (libfdk_aac preferred). Optional `qaac` and `fdkaac` as fallbacks. GUI via Qt (PySide6) on Linux.
 
 ## 6. GUI Specification (High‑Level)
 
@@ -108,13 +108,13 @@ Assumptions: hashing can be enabled/disabled (performance tradeoff). When disabl
 ## 7. Processing Pipeline and Encoding Parameters
 
 - Decode: FLAC via FFmpeg.
-- Encode: AAC LC via libfdk_aac.
+- Encode: AAC LC via preferred libfdk_aac; fallbacks: `qaac` (true VBR, e.g., `--tvbr 96`) then `fdkaac` (e.g., VBR mode 5).
 - Container: M4A (MP4). FFmpeg should write metadata tags compatible with MP4.
-- Suggested default FFmpeg flags (subject to validation):
-  - `-c:a libfdk_aac -vbr <q>` where `<q>` default aims at ~256 kbps for stereo.
-  - `-movflags +use_metadata_tags`
-  - `-map_metadata 0` (preserve tags from input)
-  - Cover art: allow FFmpeg to map embedded picture to MP4 cover; log if absent or incompatible.
+- Suggested defaults (subject to validation):
+  - Primary (FFmpeg libfdk_aac): `-c:a libfdk_aac -vbr <q>`; `-movflags +use_metadata_tags`; `-map_metadata 0`.
+  - Fallback (qaac pipe): FFmpeg decode to WAV (`-f wav -acodec pcm_s16le -`) piped to `qaac --tvbr <n>`.
+  - Fallback (fdkaac pipe): FFmpeg decode to WAV piped to `fdkaac -m <mode>`.
+  - Cover art/tags normalized post‑encode via Mutagen to ensure parity.
 - No resample/channel change unless required by encoder.
 
 ## 8. Testing and QA
@@ -141,13 +141,13 @@ AC-5: Performance: With parallelism set to min(physical_cores, 8), sustained thr
 
 - Python packaging managed with `uv`.
 - App distributed as a Python package; runs as a GUI application.
-- FFmpeg requirement documented with validation step in app startup (check `ffmpeg -encoders` contains `libfdk_aac`).
+- Preflight validates presence of at least one suitable AAC backend (prefer `libfdk_aac`; otherwise `qaac` or `fdkaac`) and reports the selected backend.
 - Optional: Provide a Dockerfile for development, noting libfdk_aac constraints.
 
 ## 11. Error Handling and Logging
 
 - Structured logs with file context, encoder version, and error codes.
-- Exit codes: 0 (success, no failures), 2 (completed with file failures), 3 (preflight failure: missing libfdk_aac).
+- Exit codes: 0 (success, no failures), 2 (completed with file failures), 3 (preflight failure: no suitable AAC encoder found).
 - GUI displays last N errors; export full JSON report.
 
 ## 12. Risks and Open Questions

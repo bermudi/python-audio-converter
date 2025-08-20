@@ -1,4 +1,8 @@
-"""Metadata helpers using mutagen for FLAC -> MP4 tag copying."""
+"""Metadata helpers using mutagen for FLAC -> MP4 tag copying.
+
+Copies common text tags, track/disc numbers, cover art, and where possible,
+MusicBrainz identifiers into MP4 freeform atoms.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,7 +25,7 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path) -> None:
     This is best-effort and idempotent; missing tags are skipped.
     """
     from mutagen.flac import FLAC
-    from mutagen.mp4 import MP4, MP4Cover
+    from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
 
     f = FLAC(str(src_flac))
     m = MP4(str(dst_mp4))
@@ -78,5 +82,23 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path) -> None:
         # Try to guess format by simple magic
         fmt = MP4Cover.FORMAT_JPEG if img[:3] == b"\xff\xd8\xff" else MP4Cover.FORMAT_PNG
         m["covr"] = [MP4Cover(img, imageformat=fmt)]
+
+    # MusicBrainz IDs -> MP4 freeform atoms (best-effort)
+    # Common FLAC keys are typically lowercased by mutagen
+    mb_map = {
+        "musicbrainz_trackid": "MusicBrainz Track Id",
+        "musicbrainz_albumid": "MusicBrainz Album Id",
+        "musicbrainz_artistid": "MusicBrainz Artist Id",
+        "musicbrainz_albumartistid": "MusicBrainz Album Artist Id",
+        "musicbrainz_releasegroupid": "MusicBrainz Release Group Id",
+    }
+    for flac_key, ff_name in mb_map.items():
+        val = (f.get(flac_key) or [None])[0]
+        if isinstance(val, str) and val.strip():
+            try:
+                m[f"----:com.apple.iTunes:{ff_name}"] = [MP4FreeForm(val.strip().encode("utf-8"))]
+            except Exception:
+                # Non-fatal; continue copying other tags
+                pass
 
     m.save()
