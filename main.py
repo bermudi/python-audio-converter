@@ -194,6 +194,7 @@ def cmd_convert_dir(
     hash_streaminfo: bool,
     verbose: bool,
     dry_run: bool,
+    force: bool,
     commit_batch_size: int,
 ) -> int:
     src_root = Path(src_dir).resolve()
@@ -240,7 +241,7 @@ def cmd_convert_dir(
         db_idx = pac_db.fetch_files_index(conn)
         d_db = time.time() - t_db_s
         t_plan_s = time.time()
-        plan = plan_changes(files, db_idx, vbr_quality=quality_for_db, encoder=selected_encoder)
+        plan = plan_changes(files, db_idx, vbr_quality=quality_for_db, encoder=selected_encoder, force=force)
         d_plan = time.time() - t_plan_s
     finally:
         pass
@@ -254,6 +255,7 @@ def cmd_convert_dir(
         f"Selected encoder: {selected_encoder} | Quality: "
         f"{(tvbr if selected_encoder=='qaac' else vbr)}"
         f" | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
+        f" | Force: {'on' if force else 'off'}"
     )
     # Show encoder binary path for transparency
     if selected_encoder == "libfdk_aac":
@@ -267,37 +269,41 @@ def cmd_convert_dir(
 
     # Concise plan breakdown by change reason
     if plan:
-        not_in_db = 0
-        changed_size = 0
-        changed_mtime = 0
-        changed_md5 = 0
-        changed_quality = 0
-        changed_encoder = 0
-        for pi in plan:
-            if pi.decision == "skip":
-                continue
-            if pi.reason == "not in DB":
-                not_in_db += 1
-            elif pi.reason.startswith("changed: "):
-                parts = [p.strip() for p in pi.reason[len("changed: "):].split(",")]
-                for p in parts:
-                    if p == "size":
-                        changed_size += 1
-                    elif p == "mtime":
-                        changed_mtime += 1
-                    elif p == "md5":
-                        changed_md5 += 1
-                    elif p == "quality":
-                        changed_quality += 1
-                    elif p == "encoder":
-                        changed_encoder += 1
-        if any([not_in_db, changed_size, changed_mtime, changed_md5, changed_quality, changed_encoder]):
-            print(
-                "Plan breakdown: "
-                + f"new={not_in_db} "
-                + f"size={changed_size} mtime={changed_mtime} md5={changed_md5} "
-                + f"quality={changed_quality} encoder={changed_encoder}"
-            )
+        if force:
+            print(f"Plan breakdown: forced={len(to_convert)}")
+        else:
+            not_in_db = 0
+            changed_size = 0
+            changed_mtime = 0
+            changed_md5 = 0
+            changed_quality = 0
+            changed_encoder = 0
+            for pi in plan:
+                if pi.decision == "skip":
+                    continue
+                if pi.reason == "not in DB":
+                    not_in_db += 1
+                elif pi.reason.startswith("changed: "):
+                    parts = [p.strip() for p in pi.reason[len("changed: "):].split(",")]
+                    for p in parts:
+                        if p == "size":
+                            changed_size += 1
+                        elif p == "mtime":
+                            changed_mtime += 1
+                        elif p == "md5":
+                            changed_md5 += 1
+                        elif p == "quality":
+                            changed_quality += 1
+                        elif p == "encoder":
+                            changed_encoder += 1
+        if not force:
+            if any([not_in_db, changed_size, changed_mtime, changed_md5, changed_quality, changed_encoder]):
+                print(
+                    "Plan breakdown: "
+                    + f"new={not_in_db} "
+                    + f"size={changed_size} mtime={changed_mtime} md5={changed_md5} "
+                    + f"quality={changed_quality} encoder={changed_encoder}"
+                )
 
     # Dry-run: show planned actions and exit without encoding
     if dry_run:
@@ -461,6 +467,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Show plan (convert/skip/reasons) and exit without encoding",
     )
     p_dir.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-encode all scanned files regardless of DB state",
+    )
+    p_dir.add_argument(
         "--commit-batch-size",
         type=int,
         default=32,
@@ -484,6 +495,7 @@ def main(argv: list[str] | None = None) -> int:
             hash_streaminfo=args.hash_streaminfo,
             verbose=args.verbose,
             dry_run=args.dry_run,
+            force=args.force,
             commit_batch_size=args.commit_batch_size,
         )
     p.error("unknown command")

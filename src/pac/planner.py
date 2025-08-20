@@ -34,6 +34,7 @@ def plan_changes(
     *,
     vbr_quality: int = 5,
     encoder: str = "libfdk_aac",
+    force: bool = False,
 ) -> List[PlanItem]:
     import sqlite3  # local import to avoid hard dependency at import time
 
@@ -42,28 +43,32 @@ def plan_changes(
         prev = db_index.get(str(sf.path))
         out_rel = sf.rel_path.with_suffix(".m4a")
         reason = ""
-        if prev is None:
+        if force:
             decision: Decision = "convert"
-            reason = "not in DB"
+            reason = "force"
         else:
-            reasons: list[str] = []
-            if prev["size"] != sf.size:
-                reasons.append("size")
-            if prev["mtime_ns"] != sf.mtime_ns:
-                reasons.append("mtime")
-            if prev["flac_md5"] and sf.flac_md5 and prev["flac_md5"] != sf.flac_md5:
-                reasons.append("md5")
-            if prev["vbr_quality"] != vbr_quality:
-                reasons.append("quality")
-            if prev["encoder"] != encoder:
-                reasons.append("encoder")
-
-            if reasons:
+            if prev is None:
                 decision = "convert"
-                reason = "changed: " + ", ".join(reasons)
+                reason = "not in DB"
             else:
-                decision = "skip"
-                reason = "unchanged"
+                reasons: list[str] = []
+                if prev["size"] != sf.size:
+                    reasons.append("size")
+                if prev["mtime_ns"] != sf.mtime_ns:
+                    reasons.append("mtime")
+                if prev["flac_md5"] and sf.flac_md5 and prev["flac_md5"] != sf.flac_md5:
+                    reasons.append("md5")
+                if prev["vbr_quality"] != vbr_quality:
+                    reasons.append("quality")
+                if prev["encoder"] != encoder:
+                    reasons.append("encoder")
+
+                if reasons:
+                    decision = "convert"
+                    reason = "changed: " + ", ".join(reasons)
+                else:
+                    decision = "skip"
+                    reason = "unchanged"
         plan.append(PlanItem(
             decision=decision,
             reason=reason,
