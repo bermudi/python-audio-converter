@@ -38,6 +38,8 @@ def build_ffmpeg_cmd(src: Path, out_tmp: Path, vbr_quality: int = 5) -> List[str
 def run_ffmpeg(cmd: List[str]) -> int:
     """Run FFmpeg and return the exit code."""
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        print("ffmpeg stderr:\n" + (proc.stderr or ""))
     return proc.returncode
 
 
@@ -115,8 +117,18 @@ def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96) -> int:
         _, err_qc = p_qc.communicate()
         # Ensure ffmpeg exits
         _, err_ff = p_ff.communicate()
-        # If qaac failed, propagate failure
-        return p_qc.returncode or 0
+        rc = p_qc.returncode or 0
+        if rc != 0:
+            if err_ff:
+                err_ff_txt = (
+                    err_ff.decode("utf-8", errors="replace")
+                    if isinstance(err_ff, (bytes, bytearray))
+                    else err_ff
+                )
+                print("ffmpeg (decode) stderr:\n" + err_ff_txt)
+            if err_qc:
+                print("qaac stderr:\n" + err_qc)
+        return rc
     finally:
         # Best-effort cleanup
         for proc in (p_ff,):
@@ -168,7 +180,18 @@ def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5) -> int:
             p_ff.stdout.close()
         _, err_fd = p_fd.communicate()
         _, err_ff = p_ff.communicate()
-        return p_fd.returncode or 0
+        rc = p_fd.returncode or 0
+        if rc != 0:
+            if err_ff:
+                err_ff_txt = (
+                    err_ff.decode("utf-8", errors="replace")
+                    if isinstance(err_ff, (bytes, bytearray))
+                    else err_ff
+                )
+                print("ffmpeg (decode) stderr:\n" + err_ff_txt)
+            if err_fd:
+                print("fdkaac stderr:\n" + err_fd)
+        return rc
     finally:
         if p_ff.poll() is None:
             p_ff.kill()
