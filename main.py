@@ -22,8 +22,7 @@ except Exception:
 
 from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
 from pac.encoder import (  # noqa: E402
-    build_ffmpeg_cmd,
-    run_ffmpeg,
+    encode_with_ffmpeg_libfdk,
     run_ffmpeg_pipe_to_qaac,
     run_ffmpeg_pipe_to_fdkaac,
 )
@@ -89,8 +88,7 @@ def cmd_convert(src: str, dest: str, tvbr: int) -> int:
 
     rc = 1
     if st.has_libfdk_aac:
-        cmd = build_ffmpeg_cmd(src_p, dest_p, vbr_quality=5)
-        rc = run_ffmpeg(cmd)
+        rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=5)
     else:
         st_qaac = probe_qaac()
         if st_qaac.available:
@@ -126,8 +124,7 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int) -> int:
 
     rc = 1
     if st.has_libfdk_aac:
-        cmd = build_ffmpeg_cmd(src_p, dest_p, vbr_quality=5)
-        rc = run_ffmpeg(cmd)
+        rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=5)
     else:
         st_qaac = probe_qaac()
         if st_qaac.available:
@@ -158,8 +155,7 @@ def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, 
     vbr: libfdk_aac/fdkaac quality/mode (1..5; 5 ~ 256 kbps typical).
     """
     if encoder == "libfdk_aac":
-        cmd = build_ffmpeg_cmd(src_p, dest_p, vbr_quality=vbr)
-        rc = run_ffmpeg(cmd)
+        rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=vbr)
         if rc != 0:
             return rc
     elif encoder == "qaac":

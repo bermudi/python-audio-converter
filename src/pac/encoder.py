@@ -1,12 +1,21 @@
 """Encoder command construction and execution.
 
 - Primary: FFmpeg with libfdk_aac (single process) when available.
-- Fallbacks: FFmpeg decode -> qaac (pipe) or -> fdkaac (pipe) handled elsewhere.
+- Fallbacks: FFmpeg decode -> qaac (pipe) or -> fdkaac (pipe).
+
+Implements atomic outputs by writing to a temporary file in the destination
+directory and renaming on success, so truncated files aren't left behind on
+failure.
+
+For qaac/fdkaac pipe workflows, default to decoding as 24-bit PCM WAV to avoid
+premature quantization of high-bit-depth sources. Optionally allow float.
 """
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -47,8 +56,12 @@ def cmd_to_string(cmd: List[str]) -> str:
     return " ".join(shlex.quote(p) for p in cmd)
 
 
-def build_ffmpeg_decode_wav_cmd(src: Path) -> List[str]:
-    """Build ffmpeg command to decode input audio to WAV on stdout."""
+def build_ffmpeg_decode_wav_cmd(src: Path, *, pcm_codec: str = "pcm_s24le") -> List[str]:
+    """Build ffmpeg command to decode input audio to WAV on stdout.
+
+    pcm_codec: one of "pcm_s16le", "pcm_s24le", "pcm_f32le".
+    Default is 24-bit PCM to preserve precision when source >16-bit.
+    """
     return [
         "ffmpeg",
         "-nostdin",
@@ -61,11 +74,48 @@ def build_ffmpeg_decode_wav_cmd(src: Path) -> List[str]:
         "-i",
         str(src),
         "-acodec",
-        "pcm_s16le",
+        pcm_codec,
         "-f",
         "wav",
         "-",
     ]
+
+
+def _temp_out_path(final_path: Path) -> Path:
+    """Return a unique temp file path in the same directory as final_path."""
+    suffix = f".part-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    return final_path.with_name(final_path.name + suffix)
+
+
+def encode_with_ffmpeg_libfdk(src: Path, dest: Path, *, vbr_quality: int = 5) -> int:
+    """Encode using ffmpeg/libfdk_aac writing atomically to dest.
+
+    Writes to a temporary file in dest's directory then renames to dest on success.
+    Returns 0 on success, non-zero on failure.
+    """
+    out_tmp = _temp_out_path(dest)
+    cmd = build_ffmpeg_cmd(src, out_tmp, vbr_quality=vbr_quality)
+    rc = run_ffmpeg(cmd)
+    if rc != 0:
+        # Best-effort cleanup of temp file if created
+        try:
+            if out_tmp.exists():
+                out_tmp.unlink()
+        except Exception:
+            pass
+        return rc
+    # Atomic replace/move
+    try:
+        os.replace(str(out_tmp), str(dest))
+    except Exception as e:
+        print(f"Rename failed: {e}")
+        try:
+            if out_tmp.exists():
+                out_tmp.unlink()
+        except Exception:
+            pass
+        return 1
+    return 0
 
 
 def build_qaac_encode_from_stdin_cmd(out_path: Path, tvbr: int = 96, extra_args: Optional[List[str]] = None) -> List[str]:
@@ -88,13 +138,17 @@ def build_qaac_encode_from_stdin_cmd(out_path: Path, tvbr: int = 96, extra_args:
     return cmd
 
 
-def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96) -> int:
-    """Run ffmpeg decoding to WAV and pipe into qaac for encoding.
+def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96, *, pcm_codec: str = "pcm_s24le") -> int:
+    """Run ffmpeg decoding to WAV and pipe into qaac for encoding atomically.
 
-    Returns qaac's exit code (non-zero indicates failure).
+    Decodes as 24-bit PCM WAV by default to avoid pre-quantization. Set
+    pcm_codec to "pcm_f32le" to pipe floats if preferred.
+
+    Returns 0 on success; non-zero on failure.
     """
-    ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src)
-    qaac_cmd = build_qaac_encode_from_stdin_cmd(dest, tvbr=tvbr)
+    out_tmp = _temp_out_path(dest)
+    ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src, pcm_codec=pcm_codec)
+    qaac_cmd = build_qaac_encode_from_stdin_cmd(out_tmp, tvbr=tvbr)
 
     p_ff = subprocess.Popen(
         ffmpeg_cmd,
@@ -127,9 +181,26 @@ def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96) -> int:
                 print("ffmpeg (decode) stderr:\n" + err_ff_txt)
             if err_qc:
                 print("qaac stderr:\n" + err_qc)
-        return rc
+            try:
+                if out_tmp.exists():
+                    out_tmp.unlink()
+            except Exception:
+                pass
+            return rc
+        # Atomic replace/move
+        try:
+            os.replace(str(out_tmp), str(dest))
+        except Exception as e:
+            print(f"Rename failed: {e}")
+            try:
+                if out_tmp.exists():
+                    out_tmp.unlink()
+            except Exception:
+                pass
+            return 1
+        return 0
     finally:
-        # Best-effort cleanup
+        # Best-effort cleanup of decoder process
         for proc in (p_ff,):
             if proc.poll() is None:
                 proc.kill()
@@ -153,13 +224,17 @@ def build_fdkaac_encode_from_stdin_cmd(out_path: Path, vbr_mode: int = 5, extra_
     return cmd
 
 
-def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5) -> int:
-    """Run ffmpeg decoding to WAV and pipe into fdkaac for encoding.
+def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5, *, pcm_codec: str = "pcm_s24le") -> int:
+    """Run ffmpeg decoding to WAV and pipe into fdkaac for encoding atomically.
 
-    Returns fdkaac's exit code (non-zero indicates failure).
+    Decodes as 24-bit PCM WAV by default to avoid pre-quantization. Set
+    pcm_codec to "pcm_f32le" to pipe floats if preferred.
+
+    Returns 0 on success; non-zero on failure.
     """
-    ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src)
-    fdkaac_cmd = build_fdkaac_encode_from_stdin_cmd(dest, vbr_mode=vbr_mode)
+    out_tmp = _temp_out_path(dest)
+    ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src, pcm_codec=pcm_codec)
+    fdkaac_cmd = build_fdkaac_encode_from_stdin_cmd(out_tmp, vbr_mode=vbr_mode)
 
     p_ff = subprocess.Popen(
         ffmpeg_cmd,
@@ -190,7 +265,24 @@ def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5) -> int:
                 print("ffmpeg (decode) stderr:\n" + err_ff_txt)
             if err_fd:
                 print("fdkaac stderr:\n" + err_fd)
-        return rc
+            try:
+                if out_tmp.exists():
+                    out_tmp.unlink()
+            except Exception:
+                pass
+            return rc
+        # Atomic replace/move
+        try:
+            os.replace(str(out_tmp), str(dest))
+        except Exception as e:
+            print(f"Rename failed: {e}")
+            try:
+                if out_tmp.exists():
+                    out_tmp.unlink()
+            except Exception:
+                pass
+            return 1
+        return 0
     finally:
         if p_ff.poll() is None:
             p_ff.kill()
