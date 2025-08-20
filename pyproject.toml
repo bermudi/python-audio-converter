@@ -4,4 +4,11 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "loguru>=0.7.3",
+    "mutagen>=1.47.0",
+    "pydantic>=2.11.7",
+    "pyside6>=6.9.1",
+    "rich>=14.1.0",
+    "tqdm>=4.67.1",
+]
