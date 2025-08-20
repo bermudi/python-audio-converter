@@ -11,7 +11,14 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from pac.ffmpeg_check import probe_ffmpeg  # noqa: E402
+from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
+from pac.encoder import (  # noqa: E402
+    build_ffmpeg_cmd,
+    run_ffmpeg,
+    run_ffmpeg_pipe_to_qaac,
+    run_ffmpeg_pipe_to_fdkaac,
+)
+from pac.metadata import copy_tags_flac_to_mp4  # noqa: E402
 from pac import db as pac_db  # noqa: E402
 
 
@@ -29,8 +36,26 @@ def cmd_preflight() -> int:
         return EXIT_PREFLIGHT_FAILED
     print(f"ffmpeg: {st.ffmpeg_path}")
     print(f"version: {st.ffmpeg_version}")
-    print(f"libfdk_aac: {'YES' if st.has_libfdk_aac else 'NO'}")
-    return EXIT_OK if st.has_libfdk_aac else EXIT_PREFLIGHT_FAILED
+    print(f"libfdk_aac (ffmpeg): {'YES' if st.has_libfdk_aac else 'NO'}")
+
+    st_fdk = probe_fdkaac()
+    print(f"fdkaac: {'FOUND' if st_fdk.available else 'NOT FOUND'}")
+    if st_fdk.available:
+        print(f"fdkaac path: {st_fdk.fdkaac_path}")
+        if st_fdk.fdkaac_version:
+            print(st_fdk.fdkaac_version)
+
+    st_qaac = probe_qaac()
+    print(f"qaac: {'FOUND' if st_qaac.available else 'NOT FOUND'}")
+    if st_qaac.available:
+        print(f"qaac path: {st_qaac.qaac_path}")
+        if st_qaac.qaac_version:
+            print(st_qaac.qaac_version)
+
+    ok = st.available and (st.has_libfdk_aac or st_fdk.available or st_qaac.available)
+    if not ok:
+        print("No AAC encoder available. Install ffmpeg with libfdk_aac, or fdkaac, or qaac.")
+    return EXIT_OK if ok else EXIT_PREFLIGHT_FAILED
 
 
 def cmd_init_db() -> int:
@@ -41,18 +66,72 @@ def cmd_init_db() -> int:
     return EXIT_OK
 
 
+def cmd_convert(src: str, dest: str, tvbr: int) -> int:
+    src_p = Path(src)
+    dest_p = Path(dest)
+
+    st = probe_ffmpeg()
+    if not st.available:
+        print("ffmpeg not found; cannot convert")
+        return EXIT_PREFLIGHT_FAILED
+
+    rc = 1
+    if st.has_libfdk_aac:
+        cmd = build_ffmpeg_cmd(src_p, dest_p, vbr_quality=5)
+        rc = run_ffmpeg(cmd)
+    else:
+        st_qaac = probe_qaac()
+        if st_qaac.available:
+            rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr)
+        else:
+            st_fdk = probe_fdkaac()
+            if st_fdk.available:
+                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5)
+            else:
+                print("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
+                return EXIT_PREFLIGHT_FAILED
+
+    if rc != 0:
+        print(f"Encode failed with exit code {rc}")
+        return EXIT_WITH_FILE_ERRORS
+
+    # Best-effort tag copy from FLAC -> MP4
+    try:
+        copy_tags_flac_to_mp4(src_p, dest_p)
+    except Exception as e:  # pragma: no cover
+        print(f"Warning: metadata copy failed: {e}")
+
+    print(f"Wrote: {dest_p}")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python-audio-converter")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("preflight", help="Check ffmpeg and libfdk_aac availability")
+    sub.add_parser("preflight", help="Check ffmpeg and AAC encoder availability")
     sub.add_parser("init-db", help="Initialize local state database")
+
+    p_convert = sub.add_parser(
+        "convert",
+        help="Convert a single source file to M4A (tvbr by default)",
+    )
+    p_convert.add_argument("src", help="Input audio file (e.g., FLAC)")
+    p_convert.add_argument("dest", help="Output .m4a path")
+    p_convert.add_argument(
+        "--tvbr",
+        type=int,
+        default=96,
+        help="qaac true VBR value targeting around 256 kbps (default: 96)",
+    )
 
     args = p.parse_args(argv)
     if args.cmd == "preflight":
         return cmd_preflight()
     if args.cmd == "init-db":
         return cmd_init_db()
+    if args.cmd == "convert":
+        return cmd_convert(args.src, args.dest, args.tvbr)
     p.error("unknown command")
     return 1
 

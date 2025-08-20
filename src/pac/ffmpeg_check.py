@@ -19,6 +19,22 @@ class FFmpegStatus:
     error: Optional[str] = None
 
 
+@dataclass
+class FdkaacStatus:
+    available: bool
+    fdkaac_path: Optional[str] = None
+    fdkaac_version: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class QaacStatus:
+    available: bool
+    qaac_path: Optional[str] = None
+    qaac_version: Optional[str] = None
+    error: Optional[str] = None
+
+
 def _run(cmd: list[str]) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
@@ -31,6 +47,30 @@ def _run(cmd: list[str]) -> tuple[int, str, str]:
         return proc.returncode, proc.stdout, proc.stderr
     except Exception as exc:  # pragma: no cover - defensive
         return 1, "", str(exc)
+
+
+def probe_qaac() -> QaacStatus:
+    path = shutil.which("qaac")
+    if not path:
+        return QaacStatus(available=False, error="qaac not found in PATH")
+    # Try bare call (prints help) and --check (often prints version/components)
+    rc1, out1, err1 = _run([path])
+    rc2, out2, err2 = _run([path, "--check"])  # ignore rc; some builds return non-zero
+    text = (out2 or "") + (err2 or "")
+    if not text:
+        text = (out1 or "") + (err1 or "")
+    version = None
+    for line in (text.splitlines() if text else []):
+        s = line.strip()
+        if s:
+            version = s
+            break
+    return QaacStatus(
+        available=True,
+        qaac_path=path,
+        qaac_version=version,
+        error=None,
+    )
 
 
 def probe_ffmpeg() -> FFmpegStatus:
@@ -55,6 +95,27 @@ def probe_ffmpeg() -> FFmpegStatus:
         error=None if rc_v == 0 else (err_v or "ffmpeg -version failed"),
     )
     return status
+
+
+def probe_fdkaac() -> FdkaacStatus:
+    path = shutil.which("fdkaac")
+    if not path:
+        return FdkaacStatus(available=False, error="fdkaac not found in PATH")
+    # fdkaac prints version on bare call or with -h
+    rc_h, out_h, err_h = _run([path])
+    text = (out_h or "") + (err_h or "")
+    version = None
+    for line in (text.splitlines() if text else []):
+        line = line.strip()
+        if line.lower().startswith("fdkaac "):
+            version = line
+            break
+    return FdkaacStatus(
+        available=True,
+        fdkaac_path=path,
+        fdkaac_version=version,
+        error=None,
+    )
 
 
 if __name__ == "__main__":
