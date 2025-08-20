@@ -5,12 +5,20 @@ import os
 import sys
 from pathlib import Path
 import time
+from concurrent.futures import as_completed
 
 # Ensure local src/ is importable when running from project root
 ROOT = Path(__file__).parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+# Prefer line-buffered output so progress prints appear promptly under wrappers
+try:  # Python 3.7+
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
 from pac.encoder import (  # noqa: E402
@@ -173,6 +181,13 @@ def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, 
     return 0
 
 
+def _encode_one_selected_timed(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int) -> tuple[int, float]:
+    """Wrapper that measures wall time for a single encode."""
+    t0 = time.time()
+    rc = _encode_one_selected(src_p, dest_p, encoder=encoder, tvbr=tvbr, vbr=vbr)
+    return rc, time.time() - t0
+
+
 def cmd_convert_dir(
     src_dir: str,
     out_dir: str,
@@ -242,8 +257,49 @@ def cmd_convert_dir(
         f"{(tvbr if selected_encoder=='qaac' else vbr)}"
         f" | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
     )
+    # Show encoder binary path for transparency
+    if selected_encoder == "libfdk_aac":
+        print(f"Encoder path: ffmpeg -> {st.ffmpeg_path}")
+    elif selected_encoder == "qaac" and st_qaac is not None and getattr(st_qaac, 'qaac_path', None):
+        print(f"Encoder path: qaac -> {st_qaac.qaac_path}")
+    elif selected_encoder == "fdkaac" and st_fdk is not None and getattr(st_fdk, 'fdkaac_path', None):
+        print(f"Encoder path: fdkaac -> {st_fdk.fdkaac_path}")
     print(f"Source: {src_root} -> Dest: {out_root}")
     print(f"Planned: {len(plan)} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)}")
+
+    # Concise plan breakdown by change reason
+    if plan:
+        not_in_db = 0
+        changed_size = 0
+        changed_mtime = 0
+        changed_md5 = 0
+        changed_quality = 0
+        changed_encoder = 0
+        for pi in plan:
+            if pi.decision == "skip":
+                continue
+            if pi.reason == "not in DB":
+                not_in_db += 1
+            elif pi.reason.startswith("changed: "):
+                parts = [p.strip() for p in pi.reason[len("changed: "):].split(",")]
+                for p in parts:
+                    if p == "size":
+                        changed_size += 1
+                    elif p == "mtime":
+                        changed_mtime += 1
+                    elif p == "md5":
+                        changed_md5 += 1
+                    elif p == "quality":
+                        changed_quality += 1
+                    elif p == "encoder":
+                        changed_encoder += 1
+        if any([not_in_db, changed_size, changed_mtime, changed_md5, changed_quality, changed_encoder]):
+            print(
+                "Plan breakdown: "
+                + f"new={not_in_db} "
+                + f"size={changed_size} mtime={changed_mtime} md5={changed_md5} "
+                + f"quality={changed_quality} encoder={changed_encoder}"
+            )
 
     if verbose:
         print(
@@ -260,20 +316,22 @@ def cmd_convert_dir(
     failed = 0
 
     t_encode_s = time.time()
-    futures = []
-    dest_paths: dict[int, tuple[Path, Path]] = {}
-    for idx, pi in enumerate(to_convert):
+    future_to: dict[Any, tuple] = {}
+    for pi in to_convert:
         dest_path = out_root / pi.output_rel
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        futures.append(pool.submit(_encode_one_selected, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr))
-        dest_paths[idx] = (pi.src_path, dest_path)
+        fut = pool.submit(_encode_one_selected, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr)
+        future_to[fut] = (pi, dest_path)
 
-    # Collect results and update DB for successes
-    for i, fut in enumerate(futures):
+    # Collect results as they complete and update DB for successes
+    total_bytes = 0
+    done = 0
+    for fut in as_completed(future_to):
+        pi, dest_path = future_to[fut]
         rc = fut.result()
+        done += 1
         if rc == 0:
             converted += 1
-            pi = to_convert[i]
             pac_db.upsert_file(
                 conn,
                 src_path=str(pi.src_path),
@@ -287,13 +345,15 @@ def cmd_convert_dir(
                 container="m4a",
             )
             conn.commit()
-            if verbose:
-                print(f"OK  {pi.rel_path} -> {pi.output_rel}")
+            try:
+                sz = dest_path.stat().st_size
+                total_bytes += sz
+            except Exception:
+                pass
+            print(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}", file=sys.stderr, flush=True)
         else:
             failed += 1
-            if verbose:
-                pi = to_convert[i]
-                print(f"ERR {pi.rel_path} -> {pi.output_rel}")
+            print(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}", file=sys.stderr, flush=True)
 
     pool.shutdown()
     conn.close()
@@ -308,6 +368,9 @@ def cmd_convert_dir(
     print(
         f"Timing: total={d_total:.3f}s preflight={d_preflight:.3f}s scan={d_scan:.3f}s db={d_db:.3f}s plan={d_plan:.3f}s encode={d_encode:.3f}s"
     )
+    if converted:
+        thr = converted / d_encode if d_encode > 0 else float('inf')
+        print(f"Throughput: {converted} files in {d_encode:.2f}s = {thr:.2f} files/s | Output size: {total_bytes/1_000_000:.2f} MB")
     return EXIT_OK if failed == 0 else EXIT_WITH_FILE_ERRORS
 
 

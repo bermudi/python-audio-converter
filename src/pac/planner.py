@@ -46,15 +46,24 @@ def plan_changes(
             decision: Decision = "convert"
             reason = "not in DB"
         else:
-            changed = (
-                prev["size"] != sf.size
-                or prev["mtime_ns"] != sf.mtime_ns
-                or (prev["flac_md5"] and sf.flac_md5 and prev["flac_md5"] != sf.flac_md5)
-                or prev["vbr_quality"] != vbr_quality
-                or prev["encoder"] != encoder
-            )
-            decision = "convert" if changed else "skip"
-            reason = "changed" if changed else "unchanged"
+            reasons: list[str] = []
+            if prev["size"] != sf.size:
+                reasons.append("size")
+            if prev["mtime_ns"] != sf.mtime_ns:
+                reasons.append("mtime")
+            if prev["flac_md5"] and sf.flac_md5 and prev["flac_md5"] != sf.flac_md5:
+                reasons.append("md5")
+            if prev["vbr_quality"] != vbr_quality:
+                reasons.append("quality")
+            if prev["encoder"] != encoder:
+                reasons.append("encoder")
+
+            if reasons:
+                decision = "convert"
+                reason = "changed: " + ", ".join(reasons)
+            else:
+                decision = "skip"
+                reason = "unchanged"
         plan.append(PlanItem(
             decision=decision,
             reason=reason,
