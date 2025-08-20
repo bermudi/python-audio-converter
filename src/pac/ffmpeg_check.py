@@ -49,11 +49,18 @@ def _run(cmd: list[str]) -> tuple[int, str, str]:
         return 1, "", str(exc)
 
 
-def probe_qaac() -> QaacStatus:
+def probe_qaac(light: bool = True) -> QaacStatus:
+    """Probe qaac availability.
+
+    light=True: only check PATH (fast), skip invoking qaac which can be slow on some systems.
+    light=False: attempt to capture version text by running qaac (may be slow).
+    """
     path = shutil.which("qaac")
     if not path:
         return QaacStatus(available=False, error="qaac not found in PATH")
-    # Try bare call (prints help) and --check (often prints version/components)
+    if light:
+        return QaacStatus(available=True, qaac_path=path, qaac_version=None, error=None)
+    # Full probe for version
     rc1, out1, err1 = _run([path])
     rc2, out2, err2 = _run([path, "--check"])  # ignore rc; some builds return non-zero
     text = (out2 or "") + (err2 or "")
@@ -65,12 +72,7 @@ def probe_qaac() -> QaacStatus:
         if s:
             version = s
             break
-    return QaacStatus(
-        available=True,
-        qaac_path=path,
-        qaac_version=version,
-        error=None,
-    )
+    return QaacStatus(available=True, qaac_path=path, qaac_version=version, error=None)
 
 
 def probe_ffmpeg() -> FFmpegStatus:

@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import time
 
 # Ensure local src/ is importable when running from project root
 ROOT = Path(__file__).parent
@@ -48,7 +49,7 @@ def cmd_preflight() -> int:
         if st_fdk.fdkaac_version:
             print(st_fdk.fdkaac_version)
 
-    st_qaac = probe_qaac()
+    st_qaac = probe_qaac(light=False)
     print(f"qaac: {'FOUND' if st_qaac.available else 'NOT FOUND'}")
     if st_qaac.available:
         print(f"qaac path: {st_qaac.qaac_path}")
@@ -180,46 +181,85 @@ def cmd_convert_dir(
     vbr: int,
     workers: int | None,
     hash_streaminfo: bool,
+    verbose: bool,
 ) -> int:
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # Preflight: at least ffmpeg must exist and some encoder available
-    st = probe_ffmpeg()
-    st_qaac = probe_qaac()
-    st_fdk = probe_fdkaac()
-    if not (st.available and (st.has_libfdk_aac or st_qaac.available or st_fdk.available)):
-        print("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
+    # Preflight: detect ffmpeg and choose encoder once for the whole run (stable planning)
+    t_preflight_s = time.time()
+    t_probe_ff = time.time(); st = probe_ffmpeg(); d_probe_ff = time.time() - t_probe_ff
+    selected_encoder = None
+    st_qaac = None
+    st_fdk = None
+    if not st.available:
+        print("ffmpeg not found; cannot convert")
         return EXIT_PREFLIGHT_FAILED
-
-    # Pick encoder once for the whole run (stable planning)
-    selected_encoder = "libfdk_aac" if st.has_libfdk_aac else ("qaac" if st_qaac.available else "fdkaac")
+    if st.has_libfdk_aac:
+        selected_encoder = "libfdk_aac"
+    else:
+        t_probe_qa = time.time(); st_qaac = probe_qaac(); d_probe_qa = time.time() - t_probe_qa
+        if st_qaac.available:
+            selected_encoder = "qaac"
+        else:
+            t_probe_fd = time.time(); st_fdk = probe_fdkaac(); d_probe_fd = time.time() - t_probe_fd
+            if st_fdk.available:
+                selected_encoder = "fdkaac"
+            else:
+                print("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
+                return EXIT_PREFLIGHT_FAILED
+    d_preflight = time.time() - t_preflight_s
     quality_for_db = tvbr if selected_encoder == "qaac" else vbr
 
     # Scan
+    t_scan_s = time.time()
     files = scan_flac_files(src_root, compute_flac_md5=hash_streaminfo)
+    d_scan = time.time() - t_scan_s
     if not files:
         print("No .flac files found")
         return EXIT_OK
 
     # DB and plan
+    t_db_s = time.time()
     conn = pac_db.connect()
     try:
         db_idx = pac_db.fetch_files_index(conn)
+        d_db = time.time() - t_db_s
+        t_plan_s = time.time()
         plan = plan_changes(files, db_idx, vbr_quality=quality_for_db, encoder=selected_encoder)
+        d_plan = time.time() - t_plan_s
     finally:
         pass
 
     to_convert = [pi for pi in plan if pi.decision == "convert"]
     unchanged = [pi for pi in plan if pi.decision == "skip"]
 
+    # Always provide basic run info
     max_workers = workers or (os.cpu_count() or 1)
+    print(
+        f"Selected encoder: {selected_encoder} | Quality: "
+        f"{(tvbr if selected_encoder=='qaac' else vbr)}"
+        f" | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
+    )
+    print(f"Source: {src_root} -> Dest: {out_root}")
+    print(f"Planned: {len(plan)} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)}")
+
+    if verbose:
+        print(
+            "Preflight: ffmpeg probe = "
+            + f"{d_probe_ff:.3f}s"
+            + (f", qaac probe = {d_probe_qa:.3f}s" if 'd_probe_qa' in locals() else "")
+            + (f", fdkaac probe = {d_probe_fd:.3f}s" if 'd_probe_fd' in locals() else "")
+        )
+        print(f"Scan: {len(files)} files in {d_scan:.3f}s | DB: {d_db:.3f}s | Plan: {d_plan:.3f}s")
+
     pool = WorkerPool(max_workers=max_workers)
 
     converted = 0
     failed = 0
 
+    t_encode_s = time.time()
     futures = []
     dest_paths: dict[int, tuple[Path, Path]] = {}
     for idx, pi in enumerate(to_convert):
@@ -247,15 +287,26 @@ def cmd_convert_dir(
                 container="m4a",
             )
             conn.commit()
+            if verbose:
+                print(f"OK  {pi.rel_path} -> {pi.output_rel}")
         else:
             failed += 1
+            if verbose:
+                pi = to_convert[i]
+                print(f"ERR {pi.rel_path} -> {pi.output_rel}")
 
     pool.shutdown()
     conn.close()
+    d_encode = time.time() - t_encode_s
 
     total = len(plan)
     print(
         f"Planned: {total} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)} | Converted: {converted} | Failed: {failed}"
+    )
+    # Always print concise timing summary
+    d_total = time.time() - t_preflight_s
+    print(
+        f"Timing: total={d_total:.3f}s preflight={d_preflight:.3f}s scan={d_scan:.3f}s db={d_db:.3f}s plan={d_plan:.3f}s encode={d_encode:.3f}s"
     )
     return EXIT_OK if failed == 0 else EXIT_WITH_FILE_ERRORS
 
@@ -317,6 +368,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable FLAC STREAMINFO MD5 (use size+mtime only)",
     )
     p_dir.set_defaults(hash_streaminfo=False)
+    p_dir.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Verbose logging: probe details, per-phase timing, per-file results",
+    )
 
     args = p.parse_args(argv)
     if args.cmd == "preflight":
@@ -333,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
             vbr=args.vbr,
             workers=args.workers,
             hash_streaminfo=args.hash_streaminfo,
+            verbose=args.verbose,
         )
     p.error("unknown command")
     return 1
