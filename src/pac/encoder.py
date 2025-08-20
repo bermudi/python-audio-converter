@@ -56,10 +56,11 @@ def cmd_to_string(cmd: List[str]) -> str:
     return " ".join(shlex.quote(p) for p in cmd)
 
 
-def build_ffmpeg_decode_wav_cmd(src: Path, *, pcm_codec: str = "pcm_s24le") -> List[str]:
+def build_ffmpeg_decode_wav_cmd(src: Path, *, pcm_codec: str = "pcm_s24le", threads: int = 1) -> List[str]:
     """Build ffmpeg command to decode input audio to WAV on stdout.
 
     pcm_codec: one of "pcm_s16le", "pcm_s24le", "pcm_f32le".
+    threads: explicit ffmpeg thread count for decode (default 1).
     Default is 24-bit PCM to preserve precision when source >16-bit.
     """
     return [
@@ -68,6 +69,8 @@ def build_ffmpeg_decode_wav_cmd(src: Path, *, pcm_codec: str = "pcm_s24le") -> L
         "-hide_banner",
         "-loglevel",
         "error",
+        "-threads",
+        str(threads),
         "-vn",
         "-sn",
         "-dn",

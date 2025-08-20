@@ -193,6 +193,8 @@ def cmd_convert_dir(
     workers: int | None,
     hash_streaminfo: bool,
     verbose: bool,
+    dry_run: bool,
+    commit_batch_size: int,
 ) -> int:
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
@@ -297,6 +299,16 @@ def cmd_convert_dir(
                 + f"quality={changed_quality} encoder={changed_encoder}"
             )
 
+    # Dry-run: show planned actions and exit without encoding
+    if dry_run:
+        print("\nPlan details:")
+        for pi in plan:
+            if pi.decision == "convert":
+                print(f"CONVERT  {pi.rel_path} -> {pi.output_rel} | {pi.reason}")
+            else:
+                print(f"SKIP     {pi.rel_path} | {pi.reason}")
+        return EXIT_OK
+
     if verbose:
         print(
             "Preflight: ffmpeg probe = "
@@ -322,6 +334,7 @@ def cmd_convert_dir(
     # Collect results as they complete and update DB for successes
     total_bytes = 0
     done = 0
+    since_commit = 0
     for fut in as_completed(future_to):
         pi, dest_path = future_to[fut]
         rc = fut.result()
@@ -340,7 +353,10 @@ def cmd_convert_dir(
                 vbr_quality=pi.vbr_quality,
                 container="m4a",
             )
-            conn.commit()
+            since_commit += 1
+            if since_commit >= max(1, commit_batch_size):
+                conn.commit()
+                since_commit = 0
             try:
                 sz = dest_path.stat().st_size
                 total_bytes += sz
@@ -351,6 +367,12 @@ def cmd_convert_dir(
             failed += 1
             print(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}", file=sys.stderr, flush=True)
 
+    # Final commit for any remaining batched operations
+    try:
+        if since_commit > 0:
+            conn.commit()
+    except Exception:
+        pass
     pool.shutdown()
     conn.close()
     d_encode = time.time() - t_encode_s
@@ -433,6 +455,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Verbose logging: probe details, per-phase timing, per-file results",
     )
+    p_dir.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show plan (convert/skip/reasons) and exit without encoding",
+    )
+    p_dir.add_argument(
+        "--commit-batch-size",
+        type=int,
+        default=32,
+        help="Batch DB commits per N successful files (default: 32)",
+    )
 
     args = p.parse_args(argv)
     if args.cmd == "preflight":
@@ -450,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             hash_streaminfo=args.hash_streaminfo,
             verbose=args.verbose,
+            dry_run=args.dry_run,
+            commit_batch_size=args.commit_batch_size,
         )
     p.error("unknown command")
     return 1
