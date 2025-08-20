@@ -106,7 +106,7 @@ Components:
        - Audio: `-c:a libfdk_aac -vbr <q>` (default q≈5 for ~256 kbps)
        - Container: M4A (`.m4a`), `-map_metadata 0`, `-movflags +use_metadata_tags`
   2) FFmpeg decode → `qaac` encode (pipe, true VBR):
-     - FFmpeg decodes FLAC to WAV on stdout; `qaac` reads from stdin with `--tvbr <n>` (default 96 ~256 kbps) and `--moov-before-mdat`.
+     - FFmpeg decodes FLAC to WAV on stdout; `qaac` reads from stdin with `--tvbr <n>` (default 96 ~256 kbps).
   3) FFmpeg decode → `fdkaac` encode (pipe):
      - FFmpeg decodes to WAV/PCM on stdout; `fdkaac` reads from stdin with VBR mode/quality targeting ~256 kbps.
 - Threads: use `-threads 1` per encode; overall concurrency controlled by worker pool.
@@ -171,7 +171,7 @@ ffmpeg -nostdin -hide_banner -loglevel error \
 ```
 ffmpeg -nostdin -hide_banner -loglevel error \
   -i "{src}" -f wav -acodec pcm_s16le - \
-| qaac --moov-before-mdat --tvbr {tvbr} -o "{tmp_out}" -
+| qaac --tvbr {tvbr} -o "{tmp_out}" -
 ```
 
 - Pipe to fdkaac (example, adjust quality flags per target):

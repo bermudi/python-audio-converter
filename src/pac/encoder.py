@@ -76,7 +76,6 @@ def build_qaac_encode_from_stdin_cmd(out_path: Path, tvbr: int = 96, extra_args:
     """
     cmd = [
         "qaac",
-        "--moov-before-mdat",
         "--tvbr",
         str(tvbr),
         "-o",
