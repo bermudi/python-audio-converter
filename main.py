@@ -323,6 +323,24 @@ def cmd_convert_dir(
                     + f"quality={changed_quality} encoder={changed_encoder}"
                 )
 
+    # Prepare run settings and insert run row before any file rows
+    started_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    settings = {
+        "source": str(src_root),
+        "dest": str(out_root),
+        "encoder": selected_encoder,
+        "quality": tvbr if selected_encoder == "qaac" else vbr,
+        "workers": max_workers,
+        "hash": bool(hash_streaminfo),
+        "force": bool(force),
+        "ffmpeg_path": getattr(st, "ffmpeg_path", None),
+        "ffmpeg_version": getattr(st, "ffmpeg_version", None),
+        "qaac_version": getattr(st_qaac, "qaac_version", None) if st_qaac is not None else None,
+        "fdkaac_version": getattr(st_fdk, "fdkaac_version", None) if st_fdk is not None else None,
+    }
+    run_id = pac_db.insert_run(conn, started_at=started_iso, ffmpeg_version=getattr(st, "ffmpeg_version", None), settings=settings)
+    conn.commit()
+
     # Dry-run: show planned actions and exit without encoding
     if dry_run:
         logger.info("Plan details:")
@@ -331,6 +349,33 @@ def cmd_convert_dir(
                 logger.info(f"CONVERT  {pi.rel_path} -> {pi.output_rel} | {pi.reason}")
             else:
                 logger.info(f"SKIP     {pi.rel_path} | {pi.reason}")
+        # Record skipped files in DB for audit even in dry-run as per tracking (status=skipped)
+        try:
+            for pi in plan:
+                if pi.decision == "skip":
+                    pac_db.insert_file_run(
+                        conn,
+                        run_id=run_id,
+                        src_path=str(pi.src_path),
+                        status="skipped",
+                        reason=pi.reason,
+                        elapsed_ms=None,
+                    )
+            pac_db.finish_run(
+                conn,
+                run_id,
+                finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                stats={
+                    "planned": len(plan),
+                    "to_convert": len(to_convert),
+                    "unchanged": len(unchanged),
+                    "converted": 0,
+                    "failed": 0,
+                },
+            )
+            conn.commit()
+        except Exception:
+            pass
         return EXIT_OK
 
     if verbose:
@@ -359,6 +404,27 @@ def cmd_convert_dir(
     total_bytes = 0
     done = 0
     since_commit = 0
+
+    # First, persist all skipped items as file_runs (status=skipped)
+    for pi in unchanged:
+        try:
+            pac_db.insert_file_run(
+                conn,
+                run_id=run_id,
+                src_path=str(pi.src_path),
+                status="skipped",
+                reason=pi.reason,
+                elapsed_ms=None,
+            )
+            since_commit += 1
+        except Exception:
+            pass
+    if since_commit:
+        try:
+            conn.commit()
+            since_commit = 0
+        except Exception:
+            pass
     for fut in as_completed(future_to):
         pi, dest_path = future_to[fut]
         rc, elapsed_s = fut.result()
@@ -378,6 +444,19 @@ def cmd_convert_dir(
                 container="m4a",
             )
             since_commit += 1
+            # file_runs: converted
+            try:
+                pac_db.insert_file_run(
+                    conn,
+                    run_id=run_id,
+                    src_path=str(pi.src_path),
+                    status="converted",
+                    reason=pi.reason,
+                    elapsed_ms=int(elapsed_s * 1000),
+                )
+                since_commit += 1
+            except Exception:
+                pass
             if since_commit >= max(1, commit_batch_size):
                 conn.commit()
                 since_commit = 0
@@ -392,6 +471,22 @@ def cmd_convert_dir(
             failed += 1
             logger.bind(action="encode", file=str(pi.rel_path), status="error", elapsed_ms=int(elapsed_s*1000)).error("encode failed")
             logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
+            # file_runs: failed
+            try:
+                pac_db.insert_file_run(
+                    conn,
+                    run_id=run_id,
+                    src_path=str(pi.src_path),
+                    status="failed",
+                    reason=pi.reason,
+                    elapsed_ms=int(elapsed_s * 1000),
+                )
+                since_commit += 1
+                if since_commit >= max(1, commit_batch_size):
+                    conn.commit()
+                    since_commit = 0
+            except Exception:
+                pass
 
     # Final commit for any remaining batched operations
     try:
@@ -400,6 +495,23 @@ def cmd_convert_dir(
     except Exception:
         pass
     pool.shutdown()
+    # Finish run
+    try:
+        pac_db.finish_run(
+            conn,
+            run_id,
+            finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            stats={
+                "planned": len(plan),
+                "to_convert": len(to_convert),
+                "unchanged": len(unchanged),
+                "converted": converted,
+                "failed": failed,
+            },
+        )
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
     d_encode = time.time() - t_encode_s
 

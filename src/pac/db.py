@@ -35,6 +35,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         _migrate_v0_to_v1(conn)
         conn.execute("PRAGMA user_version = 1")
         conn.commit()
+    # Migration: v1 -> v2 adds constraints and indexes
+    cur = conn.execute("PRAGMA user_version")
+    (ver,) = cur.fetchone()
+    if ver == 1:
+        _migrate_v1_to_v2(conn)
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
 
 
 def _migrate_v0_to_v1(conn: sqlite3.Connection) -> None:
@@ -76,6 +83,44 @@ def _migrate_v0_to_v1(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add CHECK constraint on file_runs.status and create indexes.
+
+    SQLite cannot add a CHECK to an existing column via ALTER TABLE, so we
+    recreate the table and copy data.
+    """
+    conn.executescript(
+        """
+        PRAGMA foreign_keys=off;
+        BEGIN TRANSACTION;
+
+        -- Recreate file_runs with CHECK constraint
+        CREATE TABLE IF NOT EXISTS file_runs_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES runs(id),
+            src_path TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('converted','skipped','failed')),
+            reason TEXT NULL,
+            elapsed_ms INTEGER NULL
+        );
+
+        INSERT INTO file_runs_new(id, run_id, src_path, status, reason, elapsed_ms)
+        SELECT id, run_id, src_path, status, reason, elapsed_ms FROM file_runs;
+
+        DROP TABLE file_runs;
+        ALTER TABLE file_runs_new RENAME TO file_runs;
+
+        -- Useful indexes
+        CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
+        CREATE INDEX IF NOT EXISTS idx_file_runs_run_id ON file_runs(run_id);
+        CREATE INDEX IF NOT EXISTS idx_file_runs_src_path ON file_runs(src_path);
+
+        COMMIT;
+        PRAGMA foreign_keys=on;
+        """
+    )
+
+
 def upsert_file(
     conn: sqlite3.Connection,
     *,
@@ -110,3 +155,56 @@ def upsert_file(
 def fetch_files_index(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
     rows = conn.execute("SELECT * FROM files").fetchall()
     return {row["src_path"]: row for row in rows}
+
+
+# --- Run/file_run helpers ---------------------------------------------------
+
+def insert_run(
+    conn: sqlite3.Connection,
+    *,
+    started_at: str,
+    ffmpeg_version: str | None,
+    settings: dict,
+) -> int:
+    """Insert a row into runs and return its id.
+
+    settings is serialized to JSON.
+    """
+    cur = conn.execute(
+        "INSERT INTO runs(started_at, finished_at, ffmpeg_version, settings_json, stats_json) VALUES(?,?,?,?,?)",
+        (started_at, None, ffmpeg_version or "", json.dumps(settings, sort_keys=True), None),
+    )
+    return int(cur.lastrowid)
+
+
+def finish_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    finished_at: str,
+    stats: dict | None = None,
+) -> None:
+    conn.execute(
+        "UPDATE runs SET finished_at = ?, stats_json = ? WHERE id = ?",
+        (finished_at, json.dumps(stats, sort_keys=True) if stats is not None else None, run_id),
+    )
+
+
+def insert_file_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    src_path: str,
+    status: str,
+    reason: str | None,
+    elapsed_ms: int | None,
+) -> int:
+    """Insert a file_runs row and return its id.
+
+    status must be one of 'converted','skipped','failed'.
+    """
+    cur = conn.execute(
+        "INSERT INTO file_runs(run_id, src_path, status, reason, elapsed_ms) VALUES(?,?,?,?,?)",
+        (run_id, src_path, status, reason, elapsed_ms),
+    )
+    return int(cur.lastrowid)
