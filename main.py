@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 import time
 from concurrent.futures import as_completed
+from typing import Any, Optional
+
+from loguru import logger
 
 # Ensure local src/ is importable when running from project root
 ROOT = Path(__file__).parent
@@ -38,34 +42,48 @@ EXIT_WITH_FILE_ERRORS = 2
 EXIT_PREFLIGHT_FAILED = 3
 
 
+def configure_logging(log_level: str = "INFO", log_json_path: Optional[str] = None) -> None:
+    """Configure Loguru for human console output and optional JSON lines file.
+
+    log_level: Console log level (e.g., INFO, DEBUG, WARNING).
+    log_json_path: If provided, write structured JSON lines to this path.
+    """
+    logger.remove()
+    # Human console sink
+    logger.add(sys.stderr, level=log_level.upper(), enqueue=True, backtrace=False, diagnose=False)
+    # Optional JSON lines sink
+    if log_json_path:
+        logger.add(log_json_path, level="DEBUG", serialize=True, enqueue=True)
+
+
 def cmd_preflight() -> int:
     st = probe_ffmpeg()
     if not st.available:
-        print("ffmpeg: NOT FOUND")
+        logger.error("ffmpeg: NOT FOUND")
         if st.error:
-            print(st.error)
+            logger.error(st.error)
         return EXIT_PREFLIGHT_FAILED
-    print(f"ffmpeg: {st.ffmpeg_path}")
-    print(f"version: {st.ffmpeg_version}")
-    print(f"libfdk_aac (ffmpeg): {'YES' if st.has_libfdk_aac else 'NO'}")
+    logger.info(f"ffmpeg: {st.ffmpeg_path}")
+    logger.info(f"version: {st.ffmpeg_version}")
+    logger.info(f"libfdk_aac (ffmpeg): {'YES' if st.has_libfdk_aac else 'NO'}")
 
     st_fdk = probe_fdkaac()
-    print(f"fdkaac: {'FOUND' if st_fdk.available else 'NOT FOUND'}")
+    logger.info(f"fdkaac: {'FOUND' if st_fdk.available else 'NOT FOUND'}")
     if st_fdk.available:
-        print(f"fdkaac path: {st_fdk.fdkaac_path}")
+        logger.info(f"fdkaac path: {st_fdk.fdkaac_path}")
         if st_fdk.fdkaac_version:
-            print(st_fdk.fdkaac_version)
+            logger.info(st_fdk.fdkaac_version)
 
     st_qaac = probe_qaac(light=False)
-    print(f"qaac: {'FOUND' if st_qaac.available else 'NOT FOUND'}")
+    logger.info(f"qaac: {'FOUND' if st_qaac.available else 'NOT FOUND'}")
     if st_qaac.available:
-        print(f"qaac path: {st_qaac.qaac_path}")
+        logger.info(f"qaac path: {st_qaac.qaac_path}")
         if st_qaac.qaac_version:
-            print(st_qaac.qaac_version)
+            logger.info(st_qaac.qaac_version)
 
     ok = st.available and (st.has_libfdk_aac or st_fdk.available or st_qaac.available)
     if not ok:
-        print("No AAC encoder available. Install ffmpeg with libfdk_aac, or fdkaac, or qaac.")
+        logger.error("No AAC encoder available. Install ffmpeg with libfdk_aac, or fdkaac, or qaac.")
     return EXIT_OK if ok else EXIT_PREFLIGHT_FAILED
 
 
@@ -73,7 +91,7 @@ def cmd_init_db() -> int:
     path = pac_db.get_default_db_path()
     conn = pac_db.connect(path)
     conn.close()
-    print(f"DB initialized at: {path}")
+    logger.info(f"DB initialized at: {path}")
     return EXIT_OK
 
 
@@ -83,7 +101,7 @@ def cmd_convert(src: str, dest: str, tvbr: int) -> int:
 
     st = probe_ffmpeg()
     if not st.available:
-        print("ffmpeg not found; cannot convert")
+        logger.error("ffmpeg not found; cannot convert")
         return EXIT_PREFLIGHT_FAILED
 
     rc = 1
@@ -98,20 +116,19 @@ def cmd_convert(src: str, dest: str, tvbr: int) -> int:
             if st_fdk.available:
                 rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5)
             else:
-                print("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
+                logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
                 return EXIT_PREFLIGHT_FAILED
 
     if rc != 0:
-        print(f"Encode failed with exit code {rc}")
+        logger.error(f"Encode failed with exit code {rc}")
         return EXIT_WITH_FILE_ERRORS
 
     # Best-effort tag copy from FLAC -> MP4
     try:
         copy_tags_flac_to_mp4(src_p, dest_p)
     except Exception as e:  # pragma: no cover
-        print(f"Warning: metadata copy failed: {e}")
-
-    print(f"Wrote: {dest_p}")
+        logger.warning(f"Metadata copy failed: {e}")
+    logger.info(f"Wrote: {dest_p}")
     return EXIT_OK
 
 
@@ -119,7 +136,7 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int) -> int:
     """Encode a single file using the same backend selection as cmd_convert()."""
     st = probe_ffmpeg()
     if not st.available:
-        print("ffmpeg not found; cannot convert")
+        logger.error("ffmpeg not found; cannot convert")
         return EXIT_PREFLIGHT_FAILED
 
     rc = 1
@@ -134,7 +151,7 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int) -> int:
             if st_fdk.available:
                 rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5)
             else:
-                print("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
+                logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
                 return EXIT_PREFLIGHT_FAILED
 
     if rc != 0:
@@ -143,7 +160,7 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int) -> int:
     try:
         copy_tags_flac_to_mp4(src_p, dest_p)
     except Exception as e:  # pragma: no cover
-        print(f"Warning: metadata copy failed: {e}")
+        logger.warning(f"Metadata copy failed: {e}")
     return 0
 
 
@@ -167,13 +184,13 @@ def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, 
         if rc != 0:
             return rc
     else:  # pragma: no cover - defensive
-        print(f"Unknown encoder: {encoder}")
+        logger.error(f"Unknown encoder: {encoder}")
         return 1
 
     try:
         copy_tags_flac_to_mp4(src_p, dest_p)
     except Exception as e:  # pragma: no cover
-        print(f"Warning: metadata copy failed: {e}")
+        logger.warning(f"Metadata copy failed: {e}")
     return 0
 
 
@@ -196,6 +213,7 @@ def cmd_convert_dir(
     dry_run: bool,
     force: bool,
     commit_batch_size: int,
+    log_json_path: Optional[str] = None,
 ) -> int:
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
@@ -208,7 +226,7 @@ def cmd_convert_dir(
     st_qaac = None
     st_fdk = None
     if not st.available:
-        print("ffmpeg not found; cannot convert")
+        logger.error("ffmpeg not found; cannot convert")
         return EXIT_PREFLIGHT_FAILED
     if st.has_libfdk_aac:
         selected_encoder = "libfdk_aac"
@@ -221,7 +239,7 @@ def cmd_convert_dir(
             if st_fdk.available:
                 selected_encoder = "fdkaac"
             else:
-                print("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
+                logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
                 return EXIT_PREFLIGHT_FAILED
     d_preflight = time.time() - t_preflight_s
     quality_for_db = tvbr if selected_encoder == "qaac" else vbr
@@ -231,7 +249,7 @@ def cmd_convert_dir(
     files = scan_flac_files(src_root, compute_flac_md5=hash_streaminfo)
     d_scan = time.time() - t_scan_s
     if not files:
-        print("No .flac files found")
+        logger.info("No .flac files found")
         return EXIT_OK
 
     # DB and plan
@@ -251,7 +269,7 @@ def cmd_convert_dir(
 
     # Always provide basic run info
     max_workers = workers or (os.cpu_count() or 1)
-    print(
+    logger.info(
         f"Selected encoder: {selected_encoder} | Quality: "
         f"{(tvbr if selected_encoder=='qaac' else vbr)}"
         f" | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
@@ -259,18 +277,18 @@ def cmd_convert_dir(
     )
     # Show encoder binary path for transparency
     if selected_encoder == "libfdk_aac":
-        print(f"Encoder path: ffmpeg -> {st.ffmpeg_path}")
+        logger.info(f"Encoder path: ffmpeg -> {st.ffmpeg_path}")
     elif selected_encoder == "qaac" and st_qaac is not None and getattr(st_qaac, 'qaac_path', None):
-        print(f"Encoder path: qaac -> {st_qaac.qaac_path}")
+        logger.info(f"Encoder path: qaac -> {st_qaac.qaac_path}")
     elif selected_encoder == "fdkaac" and st_fdk is not None and getattr(st_fdk, 'fdkaac_path', None):
-        print(f"Encoder path: fdkaac -> {st_fdk.fdkaac_path}")
-    print(f"Source: {src_root} -> Dest: {out_root}")
-    print(f"Planned: {len(plan)} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)}")
+        logger.info(f"Encoder path: fdkaac -> {st_fdk.fdkaac_path}")
+    logger.info(f"Source: {src_root} -> Dest: {out_root}")
+    logger.info(f"Planned: {len(plan)} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)}")
 
     # Concise plan breakdown by change reason
     if plan:
         if force:
-            print(f"Plan breakdown: forced={len(to_convert)}")
+            logger.info(f"Plan breakdown: forced={len(to_convert)}")
         else:
             not_in_db = 0
             changed_size = 0
@@ -298,7 +316,7 @@ def cmd_convert_dir(
                             changed_encoder += 1
         if not force:
             if any([not_in_db, changed_size, changed_mtime, changed_md5, changed_quality, changed_encoder]):
-                print(
+                logger.info(
                     "Plan breakdown: "
                     + f"new={not_in_db} "
                     + f"size={changed_size} mtime={changed_mtime} md5={changed_md5} "
@@ -307,22 +325,22 @@ def cmd_convert_dir(
 
     # Dry-run: show planned actions and exit without encoding
     if dry_run:
-        print("\nPlan details:")
+        logger.info("Plan details:")
         for pi in plan:
             if pi.decision == "convert":
-                print(f"CONVERT  {pi.rel_path} -> {pi.output_rel} | {pi.reason}")
+                logger.info(f"CONVERT  {pi.rel_path} -> {pi.output_rel} | {pi.reason}")
             else:
-                print(f"SKIP     {pi.rel_path} | {pi.reason}")
+                logger.info(f"SKIP     {pi.rel_path} | {pi.reason}")
         return EXIT_OK
 
     if verbose:
-        print(
+        logger.debug(
             "Preflight: ffmpeg probe = "
             + f"{d_probe_ff:.3f}s"
             + (f", qaac probe = {d_probe_qa:.3f}s" if 'd_probe_qa' in locals() else "")
             + (f", fdkaac probe = {d_probe_fd:.3f}s" if 'd_probe_fd' in locals() else "")
         )
-        print(f"Scan: {len(files)} files in {d_scan:.3f}s | DB: {d_db:.3f}s | Plan: {d_plan:.3f}s")
+        logger.debug(f"Scan: {len(files)} files in {d_scan:.3f}s | DB: {d_db:.3f}s | Plan: {d_plan:.3f}s")
 
     pool = WorkerPool(max_workers=max_workers)
 
@@ -334,7 +352,7 @@ def cmd_convert_dir(
     for pi in to_convert:
         dest_path = out_root / pi.output_rel
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        fut = pool.submit(_encode_one_selected, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr)
+        fut = pool.submit(_encode_one_selected_timed, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr)
         future_to[fut] = (pi, dest_path)
 
     # Collect results as they complete and update DB for successes
@@ -343,7 +361,7 @@ def cmd_convert_dir(
     since_commit = 0
     for fut in as_completed(future_to):
         pi, dest_path = future_to[fut]
-        rc = fut.result()
+        rc, elapsed_s = fut.result()
         done += 1
         if rc == 0:
             converted += 1
@@ -368,10 +386,12 @@ def cmd_convert_dir(
                 total_bytes += sz
             except Exception:
                 pass
-            print(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}", file=sys.stderr, flush=True)
+            logger.bind(action="encode", file=str(pi.rel_path), status="ok", elapsed_ms=int(elapsed_s*1000), bytes_out=int(sz) if 'sz' in locals() else None).info("encode complete")
+            logger.info(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}")
         else:
             failed += 1
-            print(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}", file=sys.stderr, flush=True)
+            logger.bind(action="encode", file=str(pi.rel_path), status="error", elapsed_ms=int(elapsed_s*1000)).error("encode failed")
+            logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
 
     # Final commit for any remaining batched operations
     try:
@@ -384,22 +404,71 @@ def cmd_convert_dir(
     d_encode = time.time() - t_encode_s
 
     total = len(plan)
-    print(
+    logger.info(
         f"Planned: {total} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)} | Converted: {converted} | Failed: {failed}"
     )
     # Always print concise timing summary
     d_total = time.time() - t_preflight_s
-    print(
+    logger.info(
         f"Timing: total={d_total:.3f}s preflight={d_preflight:.3f}s scan={d_scan:.3f}s db={d_db:.3f}s plan={d_plan:.3f}s encode={d_encode:.3f}s"
     )
     if converted:
         thr = converted / d_encode if d_encode > 0 else float('inf')
-        print(f"Throughput: {converted} files in {d_encode:.2f}s = {thr:.2f} files/s | Output size: {total_bytes/1_000_000:.2f} MB")
+        logger.info(f"Throughput: {converted} files in {d_encode:.2f}s = {thr:.2f} files/s | Output size: {total_bytes/1_000_000:.2f} MB")
+
+    # Write run summary JSON
+    summary: dict[str, Any] = {
+        "source": str(src_root),
+        "dest": str(out_root),
+        "encoder": selected_encoder,
+        "quality": tvbr if selected_encoder == "qaac" else vbr,
+        "workers": max_workers,
+        "hash": bool(hash_streaminfo),
+        "force": bool(force),
+        "counts": {
+            "planned": total,
+            "to_convert": len(to_convert),
+            "unchanged": len(unchanged),
+            "converted": converted,
+            "failed": failed,
+        },
+        "timing_s": {
+            "total": round(d_total, 3),
+            "preflight": round(d_preflight, 3),
+            "scan": round(d_scan, 3),
+            "db": round(d_db, 3),
+            "plan": round(d_plan, 3),
+            "encode": round(d_encode, 3),
+        },
+        "output_bytes": int(total_bytes),
+        "timestamp": int(time.time()),
+    }
+    try:
+        if log_json_path:
+            summary_path = Path(str(log_json_path) + ".summary.json")
+        else:
+            summary_path = out_root / f"pac-run-summary-{int(time.time())}.json"
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        logger.debug(f"Run summary written: {summary_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write run summary JSON: {e}")
     return EXIT_OK if failed == 0 else EXIT_WITH_FILE_ERRORS
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python-audio-converter")
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Console log level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    p.add_argument(
+        "--log-json",
+        dest="log_json",
+        default=None,
+        help="Path to write JSON lines log (structured events)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("preflight", help="Check ffmpeg and AAC encoder availability")
@@ -479,6 +548,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = p.parse_args(argv)
+    # Configure logging early
+    configure_logging(args.log_level, args.log_json)
     if args.cmd == "preflight":
         return cmd_preflight()
     if args.cmd == "init-db":
@@ -497,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             force=args.force,
             commit_batch_size=args.commit_batch_size,
+            log_json_path=args.log_json,
         )
     p.error("unknown command")
     return 1

@@ -19,6 +19,8 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
+from loguru import logger
+
 
 def build_ffmpeg_cmd(src: Path, out_tmp: Path, vbr_quality: int = 5) -> List[str]:
     return [
@@ -48,7 +50,8 @@ def run_ffmpeg(cmd: List[str]) -> int:
     """Run FFmpeg and return the exit code."""
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
-        print("ffmpeg stderr:\n" + (proc.stderr or ""))
+        if proc.stderr:
+            logger.error("ffmpeg stderr:\n{}", proc.stderr)
     return proc.returncode
 
 
@@ -98,6 +101,7 @@ def encode_with_ffmpeg_libfdk(src: Path, dest: Path, *, vbr_quality: int = 5) ->
     """
     out_tmp = _temp_out_path(dest)
     cmd = build_ffmpeg_cmd(src, out_tmp, vbr_quality=vbr_quality)
+    logger.debug("Running ffmpeg: {}", cmd_to_string(cmd))
     rc = run_ffmpeg(cmd)
     if rc != 0:
         # Best-effort cleanup of temp file if created
@@ -111,7 +115,7 @@ def encode_with_ffmpeg_libfdk(src: Path, dest: Path, *, vbr_quality: int = 5) ->
     try:
         os.replace(str(out_tmp), str(dest))
     except Exception as e:
-        print(f"Rename failed: {e}")
+        logger.error(f"Rename failed: {e}")
         try:
             if out_tmp.exists():
                 out_tmp.unlink()
@@ -181,9 +185,9 @@ def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96, *, pcm_codec:
                     if isinstance(err_ff, (bytes, bytearray))
                     else err_ff
                 )
-                print("ffmpeg (decode) stderr:\n" + err_ff_txt)
+                logger.error("ffmpeg (decode) stderr:\n{}", err_ff_txt)
             if err_qc:
-                print("qaac stderr:\n" + err_qc)
+                logger.error("qaac stderr:\n{}", err_qc)
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
@@ -194,7 +198,7 @@ def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96, *, pcm_codec:
         try:
             os.replace(str(out_tmp), str(dest))
         except Exception as e:
-            print(f"Rename failed: {e}")
+            logger.error(f"Rename failed: {e}")
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
@@ -265,9 +269,9 @@ def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5, *, pcm_c
                     if isinstance(err_ff, (bytes, bytearray))
                     else err_ff
                 )
-                print("ffmpeg (decode) stderr:\n" + err_ff_txt)
+                logger.error("ffmpeg (decode) stderr:\n{}", err_ff_txt)
             if err_fd:
-                print("fdkaac stderr:\n" + err_fd)
+                logger.error("fdkaac stderr:\n{}", err_fd)
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
@@ -278,7 +282,7 @@ def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5, *, pcm_c
         try:
             os.replace(str(out_tmp), str(dest))
         except Exception as e:
-            print(f"Rename failed: {e}")
+            logger.error(f"Rename failed: {e}")
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
