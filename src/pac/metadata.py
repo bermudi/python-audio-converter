@@ -7,15 +7,82 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import base64
 
 
 def _first_front_cover(flac_obj) -> Optional[bytes]:
-    """Return raw image bytes for front cover if present, else None."""
-    # Mutagen FLAC exposes .pictures (list of Picture)
-    for pic in getattr(flac_obj, "pictures", []) or []:
-        if getattr(pic, "type", None) == 3 and pic.data:
+    """Return raw image bytes for front cover if present, else None.
+
+    Handles multiple cover art storage patterns seen in FLAC files:
+    - Proper FLAC PICTURE blocks via ``FLAC.pictures``.
+    - Base64-encoded ``METADATA_BLOCK_PICTURE`` tag values.
+    - Legacy ``coverart``/``coverartmime`` Vorbis comment tags.
+    """
+    # 1) Preferred: FLAC PICTURE blocks parsed by mutagen
+    pictures = list(getattr(flac_obj, "pictures", []) or [])
+    for pic in pictures:
+        if getattr(pic, "type", None) == 3 and getattr(pic, "data", None):  # 3 = Front cover
             return bytes(pic.data)
-    # Some files store picture in tag 'METADATA_BLOCK_PICTURE' as base64, mutagen usually parses already
+    # If no explicit front-cover, and there is exactly one picture, accept it
+    if len(pictures) == 1 and getattr(pictures[0], "data", None):
+        return bytes(pictures[0].data)
+
+    # 2) Fallback: Some tools store METADATA_BLOCK_PICTURE as base64 in Vorbis comments
+    try:
+        mbp_values = list(flac_obj.tags.get("METADATA_BLOCK_PICTURE", [])) if getattr(flac_obj, "tags", None) else []
+    except Exception:
+        mbp_values = []
+    if mbp_values:
+        try:
+            from mutagen.flac import Picture
+            for val in mbp_values:
+                try:
+                    raw = base64.b64decode(val) if isinstance(val, (str, bytes, bytearray)) else None
+                    if not raw and isinstance(val, list) and val:
+                        raw = base64.b64decode(val[0])
+                    if not raw:
+                        continue
+                    pic = Picture()
+                    pic.from_data(raw)
+                    if getattr(pic, "type", None) == 3 and getattr(pic, "data", None):
+                        return bytes(pic.data)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        # If only a single MBP value exists and no type-3 detected, accept it as cover
+        if len(mbp_values) == 1:
+            try:
+                val = mbp_values[0]
+                raw = base64.b64decode(val) if isinstance(val, (str, bytes, bytearray)) else None
+                if not raw and isinstance(val, list) and val:
+                    raw = base64.b64decode(val[0])
+                if raw:
+                    from mutagen.flac import Picture
+                    pic = Picture(); pic.from_data(raw)
+                    if getattr(pic, "data", None):
+                        return bytes(pic.data)
+            except Exception:
+                pass
+
+    # 3) Legacy: coverart (base64) + optional coverartmime
+    try:
+        cov_vals = flac_obj.tags.get("coverart", []) if getattr(flac_obj, "tags", None) else []
+    except Exception:
+        cov_vals = []
+    if cov_vals:
+        try:
+            # mutagen normalizes keys to lowercase; values are usually base64 strings
+            val = cov_vals[0]
+            if isinstance(val, (bytes, bytearray)):
+                # Some tools may already store raw bytes; accept as-is
+                return bytes(val)
+            if isinstance(val, str):
+                return base64.b64decode(val)
+        except Exception:
+            pass
+
+    # No cover art found
     return None
 
 
