@@ -35,6 +35,7 @@ from pac import db as pac_db  # noqa: E402
 from pac.scanner import scan_flac_files  # noqa: E402
 from pac.scheduler import WorkerPool  # noqa: E402
 from pac.planner import plan_changes  # noqa: E402
+from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
 
 
 EXIT_OK = 0
@@ -570,9 +571,21 @@ def cmd_convert_dir(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python-audio-converter")
+    # Config/Logging options (defaults resolved via PacSettings)
+    p.add_argument(
+        "--config",
+        dest="config_path",
+        default=None,
+        help="Path to TOML config (default: ~/.config/python-audio-converter/config.toml)",
+    )
+    p.add_argument(
+        "--write-config",
+        action="store_true",
+        help="Write current effective settings to the config file and exit",
+    )
     p.add_argument(
         "--log-level",
-        default="INFO",
+        default=None,
         help="Console log level (DEBUG, INFO, WARNING, ERROR)",
     )
     p.add_argument(
@@ -608,34 +621,38 @@ def main(argv: list[str] | None = None) -> int:
     p_dir.add_argument(
         "--workers",
         type=int,
-        default=(os.cpu_count() or 1),
-        help="Parallel workers (default: number of CPU cores)",
+        default=None,
+        help="Parallel workers (default from settings: CPU cores if unset)",
     )
     p_dir.add_argument(
         "--tvbr",
         type=int,
-        default=96,
-        help="qaac true VBR value targeting around 256 kbps (default: 96)",
+        default=None,
+        help="qaac true VBR value targeting around 256 kbps (default from settings)",
     )
     p_dir.add_argument(
         "--vbr",
         type=int,
-        default=5,
-        help="libfdk_aac/fdkaac VBR quality/mode 1..5 (default: 5 ~ 256 kbps)",
+        default=None,
+        help="libfdk_aac/fdkaac VBR quality/mode 1..5 (default from settings)",
     )
-    p_dir.add_argument(
+    # Tri-state hash flag: default None, explicit --hash/--no-hash set True/False
+    hash_group = p_dir.add_mutually_exclusive_group()
+    hash_group.add_argument(
         "--hash",
         dest="hash_streaminfo",
-        action="store_true",
+        action="store_const",
+        const=True,
+        default=None,
         help="Compute and store FLAC STREAMINFO MD5 for change detection (slower)",
     )
-    p_dir.add_argument(
+    hash_group.add_argument(
         "--no-hash",
         dest="hash_streaminfo",
-        action="store_false",
+        action="store_const",
+        const=False,
         help="Disable FLAC STREAMINFO MD5 (use size+mtime only)",
     )
-    p_dir.set_defaults(hash_streaminfo=False)
     p_dir.add_argument(
         "--verbose",
         "-v",
@@ -655,32 +672,48 @@ def main(argv: list[str] | None = None) -> int:
     p_dir.add_argument(
         "--commit-batch-size",
         type=int,
-        default=32,
-        help="Batch DB commits per N successful files (default: 32)",
+        default=None,
+        help="Batch DB commits per N successful files (default from settings)",
     )
 
     args = p.parse_args(argv)
-    # Configure logging early
-    configure_logging(args.log_level, args.log_json)
+    # Load settings: defaults + TOML + env + CLI overrides
+    overrides = cli_overrides_from_args(args)
+    cfg = PacSettings.load(config_path=Path(args.config_path).expanduser() if args.config_path else None, overrides=overrides)
+
+    # Write config and exit if requested
+    if args.write_config:
+        written = cfg.write(Path(args.config_path).expanduser() if args.config_path else None)
+        print(f"Config written to: {written}")
+        return EXIT_OK
+
+    # Configure logging using effective settings
+    configure_logging(cfg.log_level, cfg.log_json)
     if args.cmd == "preflight":
         return cmd_preflight()
     if args.cmd == "init-db":
         return cmd_init_db()
     if args.cmd == "convert":
-        return cmd_convert(args.src, args.dest, args.tvbr)
+        tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
+        return cmd_convert(args.src, args.dest, tvbr_eff)
     if args.cmd == "convert-dir":
+        tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
+        vbr_eff = args.vbr if args.vbr is not None else cfg.vbr
+        workers_eff = args.workers if args.workers is not None else (cfg.workers or (os.cpu_count() or 1))
+        hash_eff = cfg.hash_streaminfo if args.hash_streaminfo is None else args.hash_streaminfo
+        commit_eff = args.commit_batch_size if args.commit_batch_size is not None else cfg.commit_batch_size
         return cmd_convert_dir(
             args.in_dir,
             args.out_dir,
-            tvbr=args.tvbr,
-            vbr=args.vbr,
-            workers=args.workers,
-            hash_streaminfo=args.hash_streaminfo,
+            tvbr=tvbr_eff,
+            vbr=vbr_eff,
+            workers=workers_eff,
+            hash_streaminfo=hash_eff,
             verbose=args.verbose,
             dry_run=args.dry_run,
-            force=args.force,
-            commit_batch_size=args.commit_batch_size,
-            log_json_path=args.log_json,
+            force=args.force or cfg.force,
+            commit_batch_size=commit_eff,
+            log_json_path=cfg.log_json,
         )
     p.error("unknown command")
     return 1
