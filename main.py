@@ -36,6 +36,7 @@ from pac.scanner import scan_flac_files  # noqa: E402
 from pac.scheduler import WorkerPool  # noqa: E402
 from pac.planner import plan_changes  # noqa: E402
 from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
+from pac.paths import resolve_collisions  # noqa: E402
 
 
 EXIT_OK = 0
@@ -267,6 +268,12 @@ def cmd_convert_dir(
 
     to_convert = [pi for pi in plan if pi.decision == "convert"]
     unchanged = [pi for pi in plan if pi.decision == "skip"]
+
+    # Resolve collisions among planned outputs (and against existing files under out_root)
+    if to_convert:
+        resolved = resolve_collisions([pi.output_rel for pi in to_convert], out_root=out_root)
+        for pi, new_rel in zip(to_convert, resolved):
+            pi.output_rel = new_rel
 
     # Always provide basic run info
     max_workers = workers or (os.cpu_count() or 1)

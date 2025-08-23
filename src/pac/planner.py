@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, List, Literal, Optional
 
 from .scanner import SourceFile
+from .paths import sanitize_rel_path
 
 
 Decision = Literal["convert", "skip"]
@@ -41,7 +42,8 @@ def plan_changes(
     plan: List[PlanItem] = []
     for sf in scanned:
         prev = db_index.get(str(sf.path))
-        out_rel = sf.rel_path.with_suffix(".m4a")
+        # Sanitize destination relative path and enforce .m4a suffix
+        out_rel = sanitize_rel_path(sf.rel_path, final_suffix=".m4a")
         reason = ""
         if force:
             decision: Decision = "convert"
