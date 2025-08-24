@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, List, Tuple
 
 
-_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x1F\x7F<>:\\/\|\?\*"]+")
+_ILLEGAL_CHARS_RE = re.compile(r'[\x00-\x1F\x7F<>:\/\\\|\?\*"]+')
 _MULTIPLE_UNDERSCORES_RE = re.compile(r"_+")
 
 # Many filesystems have a 255 byte/char filename limit per path segment.

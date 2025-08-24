@@ -39,6 +39,8 @@ class PacSettings(BaseSettings):
     hash_streaminfo: bool = Field(default=False, description="Compute FLAC STREAMINFO MD5 during scan")
     force: bool = Field(default=False, description="Force re-encode regardless of DB state")
     commit_batch_size: int = Field(default=32, description="Batch DB commits per N files")
+    verify_tags: bool = Field(default=False, description="After tag copy, verify a subset of tags were persisted")
+    verify_strict: bool = Field(default=False, description="Treat any verification discrepancy as a failure")
 
     # Config source/path (not persisted as part of effective config when writing)
     config_path: Path = Field(default=DEFAULT_CONFIG_PATH, exclude=True)
@@ -124,6 +126,8 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         "hash_streaminfo",
         "force",
         "commit_batch_size",
+        "verify_tags",
+        "verify_strict",
     }
     result: Dict[str, Any] = {}
     for k in keys:

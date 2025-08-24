@@ -30,7 +30,7 @@ from pac.encoder import (  # noqa: E402
     run_ffmpeg_pipe_to_qaac,
     run_ffmpeg_pipe_to_fdkaac,
 )
-from pac.metadata import copy_tags_flac_to_mp4  # noqa: E402
+from pac.metadata import copy_tags_flac_to_mp4, verify_tags_flac_vs_mp4  # noqa: E402
 from pac import db as pac_db  # noqa: E402
 from pac.scanner import scan_flac_files  # noqa: E402
 from pac.scheduler import WorkerPool  # noqa: E402
@@ -97,7 +97,7 @@ def cmd_init_db() -> int:
     return EXIT_OK
 
 
-def cmd_convert(src: str, dest: str, tvbr: int) -> int:
+def cmd_convert(src: str, dest: str, tvbr: int, *, verify_tags: bool, verify_strict: bool, log_json_path: Optional[str]) -> int:
     src_p = Path(src)
     dest_p = Path(dest)
 
@@ -130,11 +130,22 @@ def cmd_convert(src: str, dest: str, tvbr: int) -> int:
         copy_tags_flac_to_mp4(src_p, dest_p)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Metadata copy failed: {e}")
+
+    # Optional verification
+    if verify_tags:
+        try:
+            disc = verify_tags_flac_vs_mp4(src_p, dest_p)
+        except Exception as e:
+            disc = [f"verify-exception: {e}"]
+        status = "ok" if not disc else ("failed" if verify_strict else "warn")
+        logger.bind(action="verify", file=str(src_p.name), status=status, discrepancies=disc).log("WARNING" if disc else "INFO", "verify complete")
+        if disc and verify_strict:
+            return EXIT_WITH_FILE_ERRORS
     logger.info(f"Wrote: {dest_p}")
     return EXIT_OK
 
 
-def _encode_one(src_p: Path, dest_p: Path, tvbr: int) -> int:
+def _encode_one(src_p: Path, dest_p: Path, tvbr: int, *, verify_tags: bool, verify_strict: bool) -> tuple[int, str]:
     """Encode a single file using the same backend selection as cmd_convert()."""
     st = probe_ffmpeg()
     if not st.available:
@@ -157,16 +168,26 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int) -> int:
                 return EXIT_PREFLIGHT_FAILED
 
     if rc != 0:
-        return rc
+        return rc, "failed"
 
     try:
         copy_tags_flac_to_mp4(src_p, dest_p)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Metadata copy failed: {e}")
-    return 0
+    ver_status = "skipped"
+    if verify_tags:
+        try:
+            disc = verify_tags_flac_vs_mp4(src_p, dest_p)
+        except Exception as e:
+            disc = [f"verify-exception: {e}"]
+        ver_status = "ok" if not disc else ("failed" if verify_strict else "warn")
+        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log("WARNING" if disc else "INFO", "verify complete")
+        if disc and verify_strict:
+            return 1, ver_status
+    return 0, ver_status
 
 
-def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int) -> int:
+def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int, verify_tags: bool, verify_strict: bool) -> tuple[int, str]:
     """Encode using the preselected backend to keep DB planning consistent.
 
     encoder: one of "libfdk_aac", "qaac", "fdkaac".
@@ -176,31 +197,41 @@ def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, 
     if encoder == "libfdk_aac":
         rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=vbr)
         if rc != 0:
-            return rc
+            return rc, "failed"
     elif encoder == "qaac":
         rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr)
         if rc != 0:
-            return rc
+            return rc, "failed"
     elif encoder == "fdkaac":
         rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=vbr)
         if rc != 0:
-            return rc
+            return rc, "failed"
     else:  # pragma: no cover - defensive
         logger.error(f"Unknown encoder: {encoder}")
-        return 1
+        return 1, "failed"
 
     try:
         copy_tags_flac_to_mp4(src_p, dest_p)
     except Exception as e:  # pragma: no cover
         logger.warning(f"Metadata copy failed: {e}")
-    return 0
+    ver_status = "skipped"
+    if verify_tags:
+        try:
+            disc = verify_tags_flac_vs_mp4(src_p, dest_p)
+        except Exception as e:
+            disc = [f"verify-exception: {e}"]
+        ver_status = "ok" if not disc else ("failed" if verify_strict else "warn")
+        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log("WARNING" if disc else "INFO", "verify complete")
+        if disc and verify_strict:
+            return 1, ver_status
+    return 0, ver_status
 
 
-def _encode_one_selected_timed(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int) -> tuple[int, float]:
+def _encode_one_selected_timed(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int, verify_tags: bool, verify_strict: bool) -> tuple[int, float, str]:
     """Wrapper that measures wall time for a single encode."""
     t0 = time.time()
-    rc = _encode_one_selected(src_p, dest_p, encoder=encoder, tvbr=tvbr, vbr=vbr)
-    return rc, time.time() - t0
+    rc, ver_status = _encode_one_selected(src_p, dest_p, encoder=encoder, tvbr=tvbr, vbr=vbr, verify_tags=verify_tags, verify_strict=verify_strict)
+    return rc, time.time() - t0, ver_status
 
 
 def cmd_convert_dir(
@@ -216,6 +247,8 @@ def cmd_convert_dir(
     force: bool,
     commit_batch_size: int,
     log_json_path: Optional[str] = None,
+    verify_tags: bool = False,
+    verify_strict: bool = False,
 ) -> int:
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
@@ -402,10 +435,15 @@ def cmd_convert_dir(
 
     t_encode_s = time.time()
     future_to: dict[Any, tuple] = {}
+    # Verification counters
+    ver_checked = 0
+    ver_ok = 0
+    ver_warn = 0
+    ver_failed = 0
     for pi in to_convert:
         dest_path = out_root / pi.output_rel
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        fut = pool.submit(_encode_one_selected_timed, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr)
+        fut = pool.submit(_encode_one_selected_timed, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr, verify_tags=verify_tags, verify_strict=verify_strict)
         future_to[fut] = (pi, dest_path)
 
     # Collect results as they complete and update DB for successes
@@ -435,23 +473,35 @@ def cmd_convert_dir(
             pass
     for fut in as_completed(future_to):
         pi, dest_path = future_to[fut]
-        rc, elapsed_s = fut.result()
+        rc, elapsed_s, ver_status = fut.result()
         done += 1
         if rc == 0:
             converted += 1
-            pac_db.upsert_file(
-                conn,
-                src_path=str(pi.src_path),
-                rel_path=str(pi.rel_path),
-                size=pi.size or 0,
-                mtime_ns=pi.mtime_ns or 0,
-                flac_md5=pi.flac_md5,
-                output_rel=str(pi.output_rel),
-                encoder=pi.encoder,
-                vbr_quality=pi.vbr_quality,
-                container="m4a",
-            )
-            since_commit += 1
+            if verify_tags:
+                ver_checked += 1
+                if ver_status == "ok":
+                    ver_ok += 1
+                elif ver_status == "warn":
+                    ver_warn += 1
+                elif ver_status == "failed":
+                    ver_failed += 1
+            # Upsert DB for successful encode
+            try:
+                pac_db.upsert_file(
+                    conn,
+                    src_path=str(pi.src_path),
+                    rel_path=str(pi.rel_path),
+                    size=pi.size or 0,
+                    mtime_ns=pi.mtime_ns or 0,
+                    flac_md5=pi.flac_md5,
+                    output_rel=str(pi.output_rel),
+                    encoder=pi.encoder,
+                    vbr_quality=pi.vbr_quality,
+                    container="m4a",
+                )
+                since_commit += 1
+            except Exception:
+                pass
             # file_runs: converted
             try:
                 pac_db.insert_file_run(
@@ -552,6 +602,14 @@ def cmd_convert_dir(
             "converted": converted,
             "failed": failed,
         },
+        "verification": {
+            "enabled": bool(verify_tags),
+            "strict": bool(verify_strict),
+            "checked": int(ver_checked),
+            "ok": int(ver_ok),
+            "warn": int(ver_warn),
+            "failed": int(ver_failed),
+        },
         "timing_s": {
             "total": round(d_total, 3),
             "preflight": round(d_preflight, 3),
@@ -618,6 +676,16 @@ def main(argv: list[str] | None = None) -> int:
         default=96,
         help="qaac true VBR value targeting around 256 kbps (default: 96)",
     )
+    p_convert.add_argument(
+        "--verify-tags",
+        action="store_true",
+        help="After tag copy, verify a subset of tags persisted to the MP4",
+    )
+    p_convert.add_argument(
+        "--verify-strict",
+        action="store_true",
+        help="Treat any tag verification discrepancy as a failure",
+    )
 
     p_dir = sub.add_subparser if False else sub.add_parser(  # keep structure simple
         "convert-dir",
@@ -682,6 +750,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Batch DB commits per N successful files (default from settings)",
     )
+    p_dir.add_argument(
+        "--verify-tags",
+        action="store_true",
+        help="After tag copy, verify a subset of tags persisted to the MP4",
+    )
+    p_dir.add_argument(
+        "--verify-strict",
+        action="store_true",
+        help="Treat any tag verification discrepancy as a failure",
+    )
 
     args = p.parse_args(argv)
     # Load settings: defaults + TOML + env + CLI overrides
@@ -702,13 +780,17 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init_db()
     if args.cmd == "convert":
         tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
-        return cmd_convert(args.src, args.dest, tvbr_eff)
+        ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
+        ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
+        return cmd_convert(args.src, args.dest, tvbr_eff, verify_tags=ver_tags_eff, verify_strict=ver_strict_eff, log_json_path=cfg.log_json)
     if args.cmd == "convert-dir":
         tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
         vbr_eff = args.vbr if args.vbr is not None else cfg.vbr
         workers_eff = args.workers if args.workers is not None else (cfg.workers or (os.cpu_count() or 1))
         hash_eff = cfg.hash_streaminfo if args.hash_streaminfo is None else args.hash_streaminfo
         commit_eff = args.commit_batch_size if args.commit_batch_size is not None else cfg.commit_batch_size
+        ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
+        ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
         return cmd_convert_dir(
             args.in_dir,
             args.out_dir,
@@ -721,6 +803,8 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force or cfg.force,
             commit_batch_size=commit_eff,
             log_json_path=cfg.log_json,
+            verify_tags=ver_tags_eff,
+            verify_strict=ver_strict_eff,
         )
     p.error("unknown command")
     return 1

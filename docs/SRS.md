@@ -65,6 +65,8 @@ FR-13: The system shall allow re-scan and incremental runs without manual cleanu
 
 FR-14: The system shall exit with non‑zero code when any file fails, and shall summarize failures in the report.
 
+FR-15: The system shall optionally verify a subset of metadata tags and cover art after encoding and tag copy. When enabled, the system shall re-open the output M4A and compare Title, Artist, Album, Album Artist, Track/Disc numbers, Date/Year, Genre, and the presence of cover art (only when the source had art). Discrepancies shall be logged and included in the structured report. A strict mode shall cause the file to be marked as failed when any discrepancy is detected.
+
 Optional (future): CLI parity for headless automation.
 
 ## 4. Non‑Functional Requirements
@@ -77,7 +79,7 @@ NFR-3 Usability: GUI shall expose safe defaults and advanced settings behind an 
 
 NFR-4 Portability: Linux (primary). GUI and dependencies shall be available via Python packaging. Other OS may be considered later.
 
-NFR-5 Observability: Structured logs (JSON lines optional) and human‑readable logs. Per‑file summaries include input, output, bitrate, duration, tag copy result, and elapsed time.
+NFR-5 Observability: Structured logs (JSON lines optional) and human‑readable logs. Per‑file summaries include input, output, bitrate, duration, tag copy result, verification discrepancies when enabled, and elapsed time.
 
 NFR-6 Security/Privacy: No external telemetry. No upload of audio content. Store state locally under user’s config/data directory.
 
@@ -155,6 +157,7 @@ AC-5: Performance: With parallelism set to min(physical_cores, 8), sustained thr
 - libfdk_aac availability varies; users may need custom FFmpeg builds.
 - Exact VBR quality setting to hit ~256 kbps varies with content; default will be empirically chosen and documented.
 - Destination is not always mounted; only local DB signals completed conversions. Provide optional verification mode when destination is available.
+- Verification is best-effort; normalization differences (e.g., whitespace, casing, date formats) may cause benign mismatches. Strict mode should be used carefully.
 
 ## 13. References and Glossary
 

@@ -120,8 +120,24 @@ Components:
   - Read Vorbis Comments from FLAC, map to MP4 atoms where possible.
   - Preserve common fields: title, artist, album, albumartist, track/totaltracks, disc/totaldiscs, date/year, genre, compilation, MusicBrainz IDs, comment.
   - Copy embedded cover art (prefer front cover) to MP4 covr atom; scale/convert image only if required by MP4 constraints.
-- Verification:
-  - After encode, re-open output and compare a subset of tags; warn if any field fails to persist.
+- Verification (optional, `--verify-tags`):
+  - After encode and tag copy, re-open FLAC and MP4 and compare a subset:
+    - Title (©nam)
+    - Artist (©ART)
+    - Album (©alb)
+    - Album Artist (aART)
+    - Track/total (trkn) and Disc/total (disk)
+    - Date/Year (©day) comparing by leading year when both present
+    - Genre (©gen) as a string
+    - Cover presence (covr exists if source had art)
+  - Normalization rules:
+    - Trim surrounding whitespace for strings; compare case-sensitively.
+    - Parse integers for track/disc tuples; treat missing as 0.
+    - For dates, compare the first 4-digit year if both provided.
+  - Output: a list of discrepancy strings, e.g., `"title: expected='X' got='Y'"`, `"cover: missing"`.
+  - Strict mode (`--verify-strict`): if discrepancies exist, mark file as failed.
+  - Logging: emit a `verify` event with `status=ok|warn|failed` and an array of discrepancies.
+  - Reporting: when enabled, include verification totals in the run summary: `checked`, `ok`, `warn`, `failed`.
 
 ### 3.7 Scheduler and Parallelism
 - Use a bounded worker pool managing subprocess jobs.
@@ -150,6 +166,7 @@ Components:
 - Use `loguru` + optional JSON logs (one line per event) to file.
 - Per-file and per-run summaries, including ffmpeg stderr snippets on error.
 - Exit codes per SRS.
+ - Event types include: `preflight`, `scan`, `plan`, `encode`, `verify` (when enabled).
 
 ## 4. Concurrency & Performance
 - Each encode uses `-threads 1` to make throughput mostly proportional to number of workers; avoid CPU oversubscription.

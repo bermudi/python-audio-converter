@@ -169,3 +169,96 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path) -> None:
                 pass
 
     m.save()
+
+
+def _norm_str(v: Optional[str]) -> str:
+    return (v or "").strip()
+
+
+def _first_year(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    import re
+    m = re.search(r"(\d{4})", s)
+    return m.group(1) if m else None
+
+
+def verify_tags_flac_vs_mp4(src_flac: Path, dst_mp4: Path) -> list[str]:
+    """Verify a subset of tags and cover presence persisted FLAC -> MP4.
+
+    Returns a list of discrepancy messages. Empty list means OK.
+    Compared fields: title, artist, album, albumartist, track/disc numbers,
+    date/year (by year), genre, and cover presence (if source had art).
+    """
+    from mutagen.flac import FLAC
+    from mutagen.mp4 import MP4
+
+    f = FLAC(str(src_flac))
+    m = MP4(str(dst_mp4))
+
+    disc: list[str] = []
+
+    # Presence of cover art
+    had_cover = _first_front_cover(f) is not None
+    has_covr = bool(m.tags and m.tags.get("covr"))
+    if had_cover and not has_covr:
+        disc.append("cover: missing")
+
+    # String fields
+    def first(flac_key: str) -> Optional[str]:
+        try:
+            v = f.get(flac_key)
+            return v[0] if v else None
+        except Exception:
+            return None
+
+    checks = [
+        ("title", _norm_str(first("title")), _norm_str((m.tags.get("\xa9nam") or [""])[0] if m.tags else "")),
+        ("artist", _norm_str(first("artist")), _norm_str((m.tags.get("\xa9ART") or [""])[0] if m.tags else "")),
+        ("album", _norm_str(first("album")), _norm_str((m.tags.get("\xa9alb") or [""])[0] if m.tags else "")),
+        ("albumartist", _norm_str(first("albumartist")), _norm_str((m.tags.get("aART") or [""])[0] if m.tags else "")),
+        ("genre", _norm_str(first("genre")), _norm_str((m.tags.get("\xa9gen") or [""])[0] if m.tags else "")),
+    ]
+    for field, exp, got in checks:
+        if exp and exp != got:
+            disc.append(f"{field}: expected='{exp}' got='{got}'")
+
+    # Date/Year by leading year
+    exp_year = _first_year(first("date") or first("year"))
+    got_year = _first_year(((m.tags.get("\xa9day") or [""])[0] if m.tags else ""))
+    if exp_year and got_year and exp_year != got_year:
+        disc.append(f"date: expected-year='{exp_year}' got-year='{got_year}'")
+
+    # Track/disc numbers
+    def _int_or_none(x: Optional[str]) -> Optional[int]:
+        try:
+            return int(str(x).strip()) if x is not None else None
+        except Exception:
+            return None
+
+    trk = _int_or_none(first("tracknumber"))
+    trk_tot = _int_or_none(first("tracktotal") or first("totaltracks"))
+    got_trkn = m.tags.get("trkn") if m.tags else None
+    if got_trkn and isinstance(got_trkn, list) and got_trkn:
+        g_trk, g_tot = got_trkn[0]
+    else:
+        g_trk, g_tot = None, None
+    # Only compare when source has value
+    if trk is not None and trk != (g_trk or 0):
+        disc.append(f"track: expected='{trk}' got='{g_trk or 0}'")
+    if trk_tot is not None and trk_tot != (g_tot or 0):
+        disc.append(f"tracktotal: expected='{trk_tot}' got='{g_tot or 0}'")
+
+    dsk = _int_or_none(first("discnumber"))
+    dsk_tot = _int_or_none(first("disctotal") or first("totaldiscs"))
+    got_disk = m.tags.get("disk") if m.tags else None
+    if got_disk and isinstance(got_disk, list) and got_disk:
+        g_dsk, g_dtot = got_disk[0]
+    else:
+        g_dsk, g_dtot = None, None
+    if dsk is not None and dsk != (g_dsk or 0):
+        disc.append(f"disc: expected='{dsk}' got='{g_dsk or 0}'")
+    if dsk_tot is not None and dsk_tot != (g_dtot or 0):
+        disc.append(f"disctotal: expected='{dsk_tot}' got='{g_dtot or 0}'")
+
+    return disc
