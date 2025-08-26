@@ -14,3 +14,6 @@ dependencies = [
     "tqdm>=4.67.1",
     "tomlkit>=0.13.2",
 ]
+
+[project.scripts]
+pac-gui = "app.gui.main:main"
