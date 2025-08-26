@@ -70,6 +70,14 @@ def sanitize_rel_path(rel: Path, *, final_suffix: str = ".m4a") -> Path:
     return Path(*safe_parts)
 
 
+def _normcase_key(p: Path) -> str:
+    """Return a stable, case-insensitive key for a relative path.
+
+    Uses POSIX-style separators and Unicode casefold to model FAT/exFAT behavior.
+    """
+    return p.as_posix().casefold()
+
+
 def _existing_rel_paths(out_root: Path) -> set[Path]:
     """Return a set of already-present relative file paths under out_root."""
     existing: set[Path] = set()
@@ -91,46 +99,58 @@ def resolve_collisions(
     *,
     out_root: Path,
 ) -> List[Path]:
-    """Resolve duplicate destination paths deterministically.
+    """Resolve duplicate destination paths deterministically and case-insensitively.
 
-    Strategy:
-    - Start from sanitized candidates (but we sanitize again defensively).
-    - Build a taken set including existing files under `out_root`.
-    - For each candidate in stable, sorted order of its string path, if taken, append
-      " (n)" before the extension, incrementing n starting at 1, until unique.
-    - Truncate if needed to keep within per-segment limits while preserving extension.
+    Strategy (O(n log n) due to initial sort, O(1) per membership):
+    - Sanitize all candidates defensively.
+    - Build a case-insensitive `taken_keys` set from existing files under `out_root`.
+    - Process candidates in deterministic order (by their original string),
+      ensuring uniqueness against `taken_keys` by appending " (n)" before the
+      extension starting at 1. Each accepted path's normalized key is added to
+      `taken_keys` to avoid collisions among planned outputs.
+    - Return results in the original input order.
     """
-    taken: set[Path] = _existing_rel_paths(out_root)
-    result: List[Tuple[str, Path]] = []  # (key for stable ordering, resolved path)
+    # Snapshot candidates to preserve original order for the return value
+    cand_list: List[Path] = list(candidates)
 
-    # Prepare inputs with stable keys
-    items: List[Tuple[str, Path]] = [(str(p), sanitize_rel_path(p)) for p in candidates]
-    # Sort deterministically by the original planned path string
-    items.sort(key=lambda t: t[0])
+    # Preload existing outputs and create case-insensitive key set
+    existing_paths: set[Path] = _existing_rel_paths(out_root)
+    taken_keys: set[str] = {_normcase_key(p) for p in existing_paths}
 
-    resolved_map: dict[str, Path] = {}
+    # Prepare inputs with stable sort keys and sanitized forms
+    prepared: List[Tuple[str, int, Path]] = []  # (sort_key, original_index, sanitized_path)
+    for idx, p in enumerate(cand_list):
+        sort_key = str(p)
+        prepared.append((sort_key, idx, sanitize_rel_path(p)))
 
-    for key, cand in items:
-        # Ensure path parts are safe
+    # Deterministic processing order
+    prepared.sort(key=lambda t: t[0])
+
+    outputs: List[Path] = [Path()] * len(cand_list)
+
+    for _, idx, cand in prepared:
+        # Ensure path parts are safe (idempotent)
         cand = sanitize_rel_path(cand)
         final = cand
-        if final in taken or final in (p for _, p in result):
-            # Compute suffixed variants
-            stem = final.stem
-            ext = final.suffix
-            parent = final.parent
+        parent = final.parent
+        stem = final.stem
+        ext = final.suffix
+
+        key = _normcase_key(final)
+        if key in taken_keys:
             n = 1
             while True:
                 suffix = f" ({n})"
                 new_name = _sanitize_segment(stem + suffix + ext, preserve_ext=ext)
                 candidate = parent / new_name
-                if candidate not in taken and candidate not in (p for _, p in result):
+                cand_key = _normcase_key(candidate)
+                if cand_key not in taken_keys:
                     final = candidate
+                    key = cand_key
                     break
                 n += 1
-        taken.add(final)
-        result.append((key, final))
-        resolved_map[key] = final
 
-    # Return results in the original input order
-    return [resolved_map[str(p)] for p in candidates]
+        taken_keys.add(key)
+        outputs[idx] = final
+
+    return outputs

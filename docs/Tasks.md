@@ -20,7 +20,7 @@ Priority is top-down. Each task has a brief scope and acceptance criteria.
 - Accept: Peak futures ≈ O(workers). Memory/FD footprint stays stable on 100k-file catalog.
 - Refs: main.py (cmd_convert_dir), src/pac/scheduler.py.
 
-[ ] # 3. Strengthen collision resolution and case-insensitive safety
+[x] # 3. Strengthen collision resolution and case-insensitive safety
 - Why: Current resolve_collisions can be O(n²) and doesn’t guard against case-insensitive destinations.
 - Scope: Maintain taken and planned_taken sets; compare with a normalized lowercase key. Keep deterministic ordering. Optimize membership checks.
 - Accept: Resolves N=100k planned outputs within seconds; no collisions on case-insensitive volumes (FAT/exFAT) after copy.
