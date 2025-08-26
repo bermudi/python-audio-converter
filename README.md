@@ -54,7 +54,7 @@ uv run python main.py init-db
 ```
 3) Convert a single file:
 ```
-uv run python main.py convert "/path/in.flac" "/path/out.m4a" --tvbr 96
+uv run python main.py convert "/path/in.flac" "/path/out.m4a" --tvbr 96 --pcm-codec pcm_s24le
 ```
 4) Batch convert a directory (dry-run first):
 ```
@@ -68,6 +68,7 @@ uv run python main.py convert-dir \
   --workers 8 \
   --vbr 5 \
   --tvbr 96 \
+  --pcm-codec pcm_s24le \
   --hash \
   -v
 ```
@@ -83,12 +84,14 @@ Commands are implemented in [main.py](cci:7://file:///home/daniel/build/python-a
 - convert SRC DEST [--tvbr N]
   - Converts a single file to `.m4a`
   - `--tvbr`: qaac true-VBR scale (default 96 ≈ ~256 kbps typical)
+  - `--pcm-codec {pcm_s24le|pcm_f32le|pcm_s16le}`: PCM codec used for ffmpeg decode when piping to qaac/fdkaac (default: `pcm_s24le`)
 - convert-dir --in DIR --out DIR [options]
   - Recursively scans `.flac` and mirrors to `.m4a`
   - Options:
     - `--workers INT` (default: CPU cores)
     - `--tvbr INT` (qaac scale; default 96)
     - `--vbr INT` (libfdk_aac/fdkaac 1..5; default 5 ≈ ~256 kbps)
+    - `--pcm-codec {pcm_s24le|pcm_f32le|pcm_s16le}` (default `pcm_s24le`)
     - `--hash` / `--no-hash` (default: no-hash)
     - `--verbose` or `-v` (per-phase timing, probe details)
     - `--dry-run` (plan only; prints actions and reasons)
