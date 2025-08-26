@@ -21,6 +21,7 @@ Owner: daniel
 ## 2. System Overview
 
 - High-level flow: Source scan → Change detection (vs local state DB) → Work queue → Parallel transcodes (AAC encoder backend with fallback: ffmpeg+libfdk_aac → qaac(pipe) → fdkaac(pipe)) → Metadata/cover propagation → Output to target path → State DB update → Report.
+- Backend is selected once per run (stable selection) to keep planning and DB decisions consistent.
 - Components:
   - Scanner: Walks source directory, computes identifiers for change detection (see §5.2).
   - State DB: Local SQLite tracking previously converted items and parameters.
@@ -59,7 +60,7 @@ FR-10: The system shall provide a dry-run (scan only) that produces a plan witho
 
 FR-11: The system shall produce deterministic output paths using a template (default: preserve relative path; `.flac` → `.m4a`). Template shall be configurable in settings.
 
-FR-12: The system shall handle name conflicts and illegal characters in destination filesystem, applying safe transformations and logging any changes.
+FR-12: The system shall handle name conflicts and illegal characters in destination filesystem, applying safe transformations and logging any changes. Include case-insensitive collision safety for common removable filesystems (e.g., FAT/exFAT).
 
 FR-13: The system shall allow re-scan and incremental runs without manual cleanup.
 
@@ -68,6 +69,8 @@ FR-14: The system shall exit with non‑zero code when any file fails, and shall
 FR-15: The system shall optionally verify a subset of metadata tags and cover art after encoding and tag copy. When enabled, the system shall re-open the output M4A and compare Title, Artist, Album, Album Artist, Track/Disc numbers, Date/Year, Genre, and the presence of cover art (only when the source had art). Discrepancies shall be logged and included in the structured report. A strict mode shall cause the file to be marked as failed when any discrepancy is detected.
 
 Optional (future): CLI parity for headless automation.
+
+FR-16: The system shall emit structured JSON line events (optional) and shall always write a per‑run summary JSON including counts, timing, and verification totals. Log rotation/retention shall be configurable.
 
 ## 4. Non‑Functional Requirements
 
@@ -79,9 +82,11 @@ NFR-3 Usability: GUI shall expose safe defaults and advanced settings behind an 
 
 NFR-4 Portability: Linux (primary). GUI and dependencies shall be available via Python packaging. Other OS may be considered later.
 
-NFR-5 Observability: Structured logs (JSON lines optional) and human‑readable logs. Per‑file summaries include input, output, bitrate, duration, tag copy result, verification discrepancies when enabled, and elapsed time.
+NFR-5 Observability: Structured logs (JSON lines optional) and human‑readable logs. Per‑file summaries include input, output, bitrate, duration, tag copy result, verification discrepancies when enabled, and elapsed time. Logs follow a consistent schema and support rotation/retention to bound disk usage.
 
 NFR-6 Security/Privacy: No external telemetry. No upload of audio content. Store state locally under user’s config/data directory.
+
+NFR-7 Scalability of scheduling: The scheduler shall bound in‑flight work items to O(workers) to maintain stable memory and file descriptor usage on catalogs ≥100k files.
 
 ## 5. Constraints and Assumptions
 
@@ -89,9 +94,12 @@ NFR-6 Security/Privacy: No external telemetry. No upload of audio content. Store
 
 5.2 State DB: SQLite located at a standard path (e.g., `~/.local/share/python-audio-converter/state.sqlite`). Schema (initial):
 - files(id, src_path TEXT PK, rel_path TEXT, size BIGINT, mtime BIGINT, sha256 TEXT NULL, duration_ms INT NULL,
-        encoder TEXT, vbr_quality INT, container TEXT, last_converted_at DATETIME, output_rel TEXT)
+        encoder TEXT, vbr_quality INT, container TEXT, last_converted_at DATETIME NULL, output_rel TEXT)
 - runs(id PK, started_at, finished_at, ffmpeg_version, settings_json, stats_json)
 - file_runs(id PK, run_id FK, src_path, status ENUM('converted','skipped','failed'), reason TEXT, elapsed_ms INT)
+Indexes: files(rel_path), files(output_rel), files(last_converted_at), file_runs(run_id), file_runs(src_path), file_runs(status).
+file_runs.status is constrained to ENUM('converted','skipped','failed') via CHECK.
+Migration v3 adds indexes and integrity constraints if missing.
 Assumptions: hashing can be enabled/disabled (performance tradeoff). When disabled, size+mtime are used.
 
 5.3 Environment: Python 3.12. System FFmpeg (libfdk_aac preferred). Optional `qaac` and `fdkaac` as fallbacks. GUI via Qt (PySide6) on Linux.
@@ -113,9 +121,13 @@ Assumptions: hashing can be enabled/disabled (performance tradeoff). When disabl
 - Encode: AAC LC via preferred libfdk_aac; fallbacks: `qaac` (true VBR, e.g., `--tvbr 96`) then `fdkaac` (e.g., VBR mode 5).
 - Container: M4A (MP4). FFmpeg should write metadata tags compatible with MP4.
 - Suggested defaults (subject to validation):
-  - Primary (FFmpeg libfdk_aac): `-c:a libfdk_aac -vbr <q>`; `-movflags +use_metadata_tags`; `-map_metadata 0`.
-  - Fallback (qaac pipe): FFmpeg decode to WAV (`-f wav -acodec pcm_s16le -`) piped to `qaac --tvbr <n>`.
-  - Fallback (fdkaac pipe): FFmpeg decode to WAV piped to `fdkaac -m <mode>`.
+  - Primary (FFmpeg libfdk_aac): include explicit mapping and faststart:
+    `-map 0:a:0 -vn -map_metadata 0 -movflags +use_metadata_tags+faststart -c:a libfdk_aac -vbr <q> -threads 1`.
+  - Fallback (qaac pipe): decode with explicit mapping and decode intent:
+    `-map 0:a:0 -vn -sn -dn -acodec pcm_s24le -f wav -` piped to `qaac --tvbr <n>`.
+  - Fallback (fdkaac pipe): same decode mapping to `fdkaac -m <mode>`.
+  - Default PCM precision is 24‑bit (`pcm_s24le`) to preserve headroom; allow `pcm_f32le` via settings.
+  - Always include `-vn -sn -dn` during decode.
   - Cover art/tags normalized post‑encode via Mutagen to ensure parity.
 - No resample/channel change unless required by encoder.
 
@@ -125,6 +137,9 @@ Assumptions: hashing can be enabled/disabled (performance tradeoff). When disabl
 - Integration: end‑to‑end encode of sample FLACs; verify duration, container, average bitrate range, and tag parity (mutagen).
 - Golden samples: curated FLAC set with various tag combinations and embedded art.
 - Concurrency: stress tests with N workers; ensure no DB contention or race conditions.
+ - Collision resolution tests include case‑insensitive scenarios.
+ - Scheduling tests confirm bounded in‑flight tasks under large catalogs.
+ - Verification tests include Unicode normalization and whitespace rules.
 - Failure modes: missing libfdk_aac, corrupted FLAC, write permission errors, out‑of‑space.
 
 ## 9. Acceptance Criteria (Initial Targets)
@@ -139,6 +154,10 @@ AC-4: Stability: Zero crashes across 3 full library runs; all failures reported 
 
 AC-5: Performance: With parallelism set to min(physical_cores, 8), sustained throughput scales with workers until CPU saturates; no more than 10% slowdown caused by DB overhead.
 
+AC-6 (Collision safety): On a destination mounted with a case‑insensitive filesystem, no collisions occur after sanitization and resolution; outputs are deterministic.
+
+AC-7 (Scheduler footprint): With W workers and catalog size ≥50k, peak in‑flight tasks ≤2W and memory/FD footprint remains stable.
+
 ## 10. Deployment and Packaging
 
 - Python packaging managed with `uv`.
@@ -151,6 +170,7 @@ AC-5: Performance: With parallelism set to min(physical_cores, 8), sustained thr
 - Structured logs with file context, encoder version, and error codes.
 - Exit codes: 0 (success, no failures), 2 (completed with file failures), 3 (preflight failure: no suitable AAC encoder found).
 - GUI displays last N errors; export full JSON report.
+ - Per‑file structured events use a standard schema; a per‑run summary JSON is always written. Rotation/retention are configurable.
 
 ## 12. Risks and Open Questions
 
@@ -158,6 +178,8 @@ AC-5: Performance: With parallelism set to min(physical_cores, 8), sustained thr
 - Exact VBR quality setting to hit ~256 kbps varies with content; default will be empirically chosen and documented.
 - Destination is not always mounted; only local DB signals completed conversions. Provide optional verification mode when destination is available.
 - Verification is best-effort; normalization differences (e.g., whitespace, casing, date formats) may cause benign mismatches. Strict mode should be used carefully.
+ - Case‑insensitive/reserved names on removable media may still surface edge cases; mitigated by enhanced sanitizer and collision resolution.
+ - Cover art downscaling policy (max dimensions/format) is configurable; defaults will be documented.
 
 ## 13. References and Glossary
 
