@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 import time
-from concurrent.futures import as_completed
+import threading
 from typing import Any, Optional
 
 from loguru import logger
@@ -482,27 +482,11 @@ def cmd_convert_dir(
     failed = 0
 
     t_encode_s = time.time()
-    future_to: dict[Any, tuple] = {}
     # Verification counters
     ver_checked = 0
     ver_ok = 0
     ver_warn = 0
     ver_failed = 0
-    for pi in to_convert:
-        dest_path = out_root / pi.output_rel
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        fut = pool.submit(
-            _encode_one_selected_timed,
-            pi.src_path,
-            dest_path,
-            encoder=selected_encoder,
-            tvbr=tvbr,
-            vbr=vbr,
-            pcm_codec=pcm_codec,
-            verify_tags=verify_tags,
-            verify_strict=verify_strict,
-        )
-        future_to[fut] = (pi, dest_path)
 
     # Collect results as they complete and update DB for successes
     total_bytes = 0
@@ -529,9 +513,27 @@ def cmd_convert_dir(
             since_commit = 0
         except Exception:
             pass
-    for fut in as_completed(future_to):
-        pi, dest_path = future_to[fut]
-        rc, elapsed_s, ver_status = fut.result()
+    # Bounded processing via WorkerPool to keep <= ~2x workers in flight
+    bound = max(1, max_workers * 2)
+    stop_event = threading.Event()  # Hook for future GUI pause/cancel
+
+    def _task(pi):
+        dp = out_root / pi.output_rel
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        return _encode_one_selected_timed(
+            pi.src_path,
+            dp,
+            encoder=selected_encoder,
+            tvbr=tvbr,
+            vbr=vbr,
+            pcm_codec=pcm_codec,
+            verify_tags=verify_tags,
+            verify_strict=verify_strict,
+        )
+
+    for pi, res in pool.imap_unordered_bounded(_task, to_convert, max_pending=bound, stop_event=stop_event):
+        dest_path = out_root / pi.output_rel
+        rc, elapsed_s, ver_status = res
         done += 1
         if rc == 0:
             converted += 1

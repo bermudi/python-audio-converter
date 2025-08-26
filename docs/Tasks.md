@@ -14,7 +14,7 @@ Priority is top-down. Each task has a brief scope and acceptance criteria.
 - Accept: Encodes succeed with first audio stream only; MP4 opens quickly; commands logged include these flags.
 - Refs: src/pac/encoder.py, src/pac/config.py.
 
-[ ] # 2. Bounded concurrency for large libraries
+[x] # 2. Bounded concurrency for large libraries
 - Why: Avoid creating O(N) futures/memory/FD pressure on big runs.
 - Scope: Submit up to 2×workers tasks; enqueue next as one finishes (producer-consumer), or implement a bounded queue inside WorkerPool.
 - Accept: Peak futures ≈ O(workers). Memory/FD footprint stays stable on 100k-file catalog.
