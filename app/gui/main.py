@@ -151,6 +151,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Load defaults
         self.settings = PacSettings.load()
+        # Encoder selected by preflight: one of None, "libfdk_aac", "qaac", "fdkaac"
+        self.selected_encoder: Optional[str] = None
 
         # Central layout
         central = QtWidgets.QWidget()
@@ -191,10 +193,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tvbr = QtWidgets.QSpinBox()
         self.spin_tvbr.setRange(0, 127)
         self.spin_tvbr.setValue(self.settings.tvbr)
+        self.spin_tvbr.setToolTip("Used only when encoder is qaac (tvbr scale, ~256 kbps at ~96)")
 
         self.spin_vbr = QtWidgets.QSpinBox()
         self.spin_vbr.setRange(1, 5)
         self.spin_vbr.setValue(self.settings.vbr)
+        self.spin_vbr.setToolTip("Used when encoder is libfdk_aac or fdkaac (1..5; 5 ~ 256 kbps)")
 
         self.chk_hash = QtWidgets.QCheckBox("Compute FLAC STREAMINFO MD5 (slower)")
         self.chk_hash.setChecked(self.settings.hash_streaminfo)
@@ -215,6 +219,11 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.chk_verify, 1, 3, 1, 2)
         grid.addWidget(self.chk_verify_strict, 1, 5, 1, 1)
         form.addRow("Settings:", self._wrap_row(grid))
+        # Encoder/quality hint labels
+        self.lbl_encoder_status = QtWidgets.QLabel("Encoder: unknown")
+        self.lbl_quality_hint = QtWidgets.QLabel("Quality used: (depends on encoder)")
+        form.addRow("Encoder:", self.lbl_encoder_status)
+        form.addRow("Quality used:", self.lbl_quality_hint)
         outer.addLayout(form)
 
         # Action buttons
@@ -289,13 +298,50 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.lbl_preflight.setText(txt)
             logger.info("Preflight OK")
+            # Decide encoder exactly like the CLI does
+            enc: Optional[str]
+            if res.get("libfdk_aac"):
+                enc = "libfdk_aac"
+            elif bool(res.get("qaac")):
+                enc = "qaac"
+            elif bool(res.get("fdkaac")):
+                enc = "fdkaac"
+            else:
+                enc = None
+            self.selected_encoder = enc
+            self._apply_encoder_ui(enc)
         else:
             self.lbl_preflight.setText("No suitable AAC encoder found")
             logger.error("No AAC encoder available. Install ffmpeg with libfdk_aac, or fdkaac, or qaac.")
+            self.selected_encoder = None
+            self._apply_encoder_ui(None)
 
     def _on_preflight_err(self, msg: str) -> None:
         self.lbl_preflight.setText(f"Preflight error: {msg}")
         logger.error(f"Preflight error: {msg}")
+        self.selected_encoder = None
+        self._apply_encoder_ui(None)
+
+    def _apply_encoder_ui(self, enc: Optional[str]) -> None:
+        """Enable/disable tvbr vs vbr controls and show a hint based on encoder.
+
+        enc: one of None, "libfdk_aac", "qaac", "fdkaac".
+        """
+        if enc is None:
+            self.lbl_encoder_status.setText("unknown (run Preflight)")
+            self.lbl_quality_hint.setText("tvbr (qaac) or vbr (libfdk/fdkaac), depending on availability")
+            self.spin_tvbr.setEnabled(True)
+            self.spin_vbr.setEnabled(True)
+            return
+        self.lbl_encoder_status.setText(enc)
+        if enc == "qaac":
+            self.spin_tvbr.setEnabled(True)
+            self.spin_vbr.setEnabled(False)
+            self.lbl_quality_hint.setText("Using qaac tvbr (only tvbr applies)")
+        else:  # libfdk_aac or fdkaac
+            self.spin_tvbr.setEnabled(False)
+            self.spin_vbr.setEnabled(True)
+            self.lbl_quality_hint.setText("Using VBR for libfdk_aac/fdkaac (only vbr applies)")
 
     def _gather_params(self) -> tuple[Optional[Path], Optional[Path], int, int, int, bool, bool, bool, int, bool, bool]:
         src = Path(self.edit_src.text().strip()) if self.edit_src.text().strip() else None
