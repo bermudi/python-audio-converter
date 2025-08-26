@@ -110,18 +110,18 @@ Components:
        - `-c:a libfdk_aac -vbr <q>` (default q≈5 for ~256 kbps)
   2) FFmpeg decode → `qaac` encode (pipe, true VBR):
      - FFmpeg decode to WAV on stdout with explicit mapping and decode intent:
-       `-map 0:a:0 -vn -sn -dn -acodec pcm_s24le -f wav -`
+       `-map 0:a:0 -vn -sn -dn -acodec <pcm_codec> -f wav -`
        Encoder reads from stdin: `qaac --tvbr <n> -o "{tmp_out}" -` (default 96 ~256 kbps).
   3) FFmpeg decode → `fdkaac` encode (pipe):
      - FFmpeg decode to WAV on stdout with explicit mapping and decode intent:
-       `-map 0:a:0 -vn -sn -dn -acodec pcm_s24le -f wav -`
+       `-map 0:a:0 -vn -sn -dn -acodec <pcm_codec> -f wav -`
        Encoder reads from stdin: `fdkaac -m <mode> -o "{tmp_out}" -` (target ~256 kbps).
 - Threads: use `-threads 1` per encode; overall concurrency controlled by worker pool.
 - Metadata handling:
   - Always run a post-encode step using Mutagen to ensure tag and cover art parity (FLAC → MP4). This guarantees consistent cover art even when encoders differ in automatic mapping.
 - Output workflow:
   - Write to temporary file under destination (`.part` extension), then atomically rename to final path on success. On failure, remove temp file and log reason.
- - PCM precision: Default is 24‑bit (`pcm_s24le`) to preserve headroom; allow `pcm_f32le` via settings.
+ - PCM precision: Default is 24‑bit (`pcm_s24le`) to preserve headroom; allow `pcm_f32le` (or `pcm_s16le`) via setting/CLI `--pcm-codec`.
 
 ### 3.6 Metadata Copier/Verifier
 - Use Mutagen:
@@ -169,13 +169,14 @@ Components:
 
 ### 3.9 Config
 - Pydantic settings model; persisted as TOML under `~/.config/python-audio-converter/config.toml`.
-- Key fields:
+ - Key fields:
   - log_level, log_json
   - tvbr (qaac), vbr (libfdk/fdkaac), workers
+  - pcm_codec (pcm_s24le|pcm_f32le|pcm_s16le)
   - hash_streaminfo, force, commit_batch_size
   - verify_tags, verify_strict
-  - future: pcm_codec (pcm_s24le|pcm_f32le), faststart toggle, scan_duration, progress default, log rotation/retention
-  - Note: Settings are merged from defaults + TOML + env (PAC_*) + CLI overrides; `--write-config` emits the effective TOML.
+ - Future additions: faststart toggle (currently always enabled), scan_duration, progress default, log rotation/retention
+ - Note: Settings are merged from defaults + TOML + env (PAC_*) + CLI overrides; `--write-config` emits the effective TOML.
 
 ### 3.10 Logging & Reporting
 - Use `loguru` with human console logs and optional structured JSON lines. Standard event fields: ts, action, file, rel_path, status, elapsed_ms, bytes_out, encoder, quality, run_id. A per‑run JSON summary is always written. Support log rotation/retention via settings.
@@ -202,20 +203,21 @@ ffmpeg -nostdin -hide_banner -loglevel error
  - Pipe to qaac (true VBR), approximate shell representation:
 ```
 ffmpeg -nostdin -hide_banner -loglevel error
-  -i "{src}" -map 0:a:0 -vn -sn -dn -acodec pcm_s24le -f wav -
+  -i "{src}" -map 0:a:0 -vn -sn -dn -acodec <pcm_codec> -f wav -
 | qaac --tvbr {tvbr} -o "{tmp_out}" -
 ```
 
  - Pipe to fdkaac (example, adjust quality flags per target):
 ```
 ffmpeg -nostdin -hide_banner -loglevel error
-  -i "{src}" -map 0:a:0 -vn -sn -dn -acodec pcm_s24le -f wav -
+  -i "{src}" -map 0:a:0 -vn -sn -dn -acodec <pcm_codec> -f wav -
 | fdkaac -m 5 -o "{tmp_out}" -
 ```
 
  - Notes:
   - Always use explicit stream mapping (`-map 0:a:0`) to avoid accidental multi‑stream behavior.
-  - `-vn` ensures no video streams are carried over; cover art is later ensured via Mutagen if missing.
+  - `-vn -sn -dn` ensures no video/subtitle/data streams are carried over; cover art is ensured later via Mutagen.
+  - `-movflags +use_metadata_tags+faststart` is always set for MP4 output for better player compatibility.
   - For piping, we use robust subprocess management without temp WAV files; stderr is captured for diagnostics.
 
 ## 6. Change Detection Algorithm

@@ -97,7 +97,16 @@ def cmd_init_db() -> int:
     return EXIT_OK
 
 
-def cmd_convert(src: str, dest: str, tvbr: int, *, verify_tags: bool, verify_strict: bool, log_json_path: Optional[str]) -> int:
+def cmd_convert(
+    src: str,
+    dest: str,
+    tvbr: int,
+    *,
+    pcm_codec: str,
+    verify_tags: bool,
+    verify_strict: bool,
+    log_json_path: Optional[str],
+) -> int:
     src_p = Path(src)
     dest_p = Path(dest)
 
@@ -112,11 +121,11 @@ def cmd_convert(src: str, dest: str, tvbr: int, *, verify_tags: bool, verify_str
     else:
         st_qaac = probe_qaac()
         if st_qaac.available:
-            rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr)
+            rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr, pcm_codec=pcm_codec)
         else:
             st_fdk = probe_fdkaac()
             if st_fdk.available:
-                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5)
+                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5, pcm_codec=pcm_codec)
             else:
                 logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
                 return EXIT_PREFLIGHT_FAILED
@@ -145,7 +154,15 @@ def cmd_convert(src: str, dest: str, tvbr: int, *, verify_tags: bool, verify_str
     return EXIT_OK
 
 
-def _encode_one(src_p: Path, dest_p: Path, tvbr: int, *, verify_tags: bool, verify_strict: bool) -> tuple[int, str]:
+def _encode_one(
+    src_p: Path,
+    dest_p: Path,
+    tvbr: int,
+    *,
+    pcm_codec: str,
+    verify_tags: bool,
+    verify_strict: bool,
+) -> tuple[int, str]:
     """Encode a single file using the same backend selection as cmd_convert()."""
     st = probe_ffmpeg()
     if not st.available:
@@ -158,11 +175,11 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int, *, verify_tags: bool, veri
     else:
         st_qaac = probe_qaac()
         if st_qaac.available:
-            rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr)
+            rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr, pcm_codec=pcm_codec)
         else:
             st_fdk = probe_fdkaac()
             if st_fdk.available:
-                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5)
+                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5, pcm_codec=pcm_codec)
             else:
                 logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
                 return EXIT_PREFLIGHT_FAILED
@@ -187,7 +204,17 @@ def _encode_one(src_p: Path, dest_p: Path, tvbr: int, *, verify_tags: bool, veri
     return 0, ver_status
 
 
-def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int, verify_tags: bool, verify_strict: bool) -> tuple[int, str]:
+def _encode_one_selected(
+    src_p: Path,
+    dest_p: Path,
+    *,
+    encoder: str,
+    tvbr: int,
+    vbr: int,
+    pcm_codec: str,
+    verify_tags: bool,
+    verify_strict: bool,
+) -> tuple[int, str]:
     """Encode using the preselected backend to keep DB planning consistent.
 
     encoder: one of "libfdk_aac", "qaac", "fdkaac".
@@ -199,11 +226,11 @@ def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, 
         if rc != 0:
             return rc, "failed"
     elif encoder == "qaac":
-        rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr)
+        rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr, pcm_codec=pcm_codec)
         if rc != 0:
             return rc, "failed"
     elif encoder == "fdkaac":
-        rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=vbr)
+        rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=vbr, pcm_codec=pcm_codec)
         if rc != 0:
             return rc, "failed"
     else:  # pragma: no cover - defensive
@@ -227,10 +254,29 @@ def _encode_one_selected(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, 
     return 0, ver_status
 
 
-def _encode_one_selected_timed(src_p: Path, dest_p: Path, *, encoder: str, tvbr: int, vbr: int, verify_tags: bool, verify_strict: bool) -> tuple[int, float, str]:
+def _encode_one_selected_timed(
+    src_p: Path,
+    dest_p: Path,
+    *,
+    encoder: str,
+    tvbr: int,
+    vbr: int,
+    pcm_codec: str,
+    verify_tags: bool,
+    verify_strict: bool,
+) -> tuple[int, float, str]:
     """Wrapper that measures wall time for a single encode."""
     t0 = time.time()
-    rc, ver_status = _encode_one_selected(src_p, dest_p, encoder=encoder, tvbr=tvbr, vbr=vbr, verify_tags=verify_tags, verify_strict=verify_strict)
+    rc, ver_status = _encode_one_selected(
+        src_p,
+        dest_p,
+        encoder=encoder,
+        tvbr=tvbr,
+        vbr=vbr,
+        pcm_codec=pcm_codec,
+        verify_tags=verify_tags,
+        verify_strict=verify_strict,
+    )
     return rc, time.time() - t0, ver_status
 
 
@@ -247,6 +293,7 @@ def cmd_convert_dir(
     force: bool,
     commit_batch_size: int,
     log_json_path: Optional[str] = None,
+    pcm_codec: str = "pcm_s24le",
     verify_tags: bool = False,
     verify_strict: bool = False,
 ) -> int:
@@ -313,7 +360,7 @@ def cmd_convert_dir(
     logger.info(
         f"Selected encoder: {selected_encoder} | Quality: "
         f"{(tvbr if selected_encoder=='qaac' else vbr)}"
-        f" | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
+        f" | PCM: {pcm_codec} | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
         f" | Force: {'on' if force else 'off'}"
     )
     # Show encoder binary path for transparency
@@ -371,6 +418,7 @@ def cmd_convert_dir(
         "dest": str(out_root),
         "encoder": selected_encoder,
         "quality": tvbr if selected_encoder == "qaac" else vbr,
+        "pcm_codec": pcm_codec,
         "workers": max_workers,
         "hash": bool(hash_streaminfo),
         "force": bool(force),
@@ -443,7 +491,17 @@ def cmd_convert_dir(
     for pi in to_convert:
         dest_path = out_root / pi.output_rel
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        fut = pool.submit(_encode_one_selected_timed, pi.src_path, dest_path, encoder=selected_encoder, tvbr=tvbr, vbr=vbr, verify_tags=verify_tags, verify_strict=verify_strict)
+        fut = pool.submit(
+            _encode_one_selected_timed,
+            pi.src_path,
+            dest_path,
+            encoder=selected_encoder,
+            tvbr=tvbr,
+            vbr=vbr,
+            pcm_codec=pcm_codec,
+            verify_tags=verify_tags,
+            verify_strict=verify_strict,
+        )
         future_to[fut] = (pi, dest_path)
 
     # Collect results as they complete and update DB for successes
@@ -602,6 +660,7 @@ def cmd_convert_dir(
             "converted": converted,
             "failed": failed,
         },
+        "pcm_codec": pcm_codec,
         "verification": {
             "enabled": bool(verify_tags),
             "strict": bool(verify_strict),
@@ -677,6 +736,13 @@ def main(argv: list[str] | None = None) -> int:
         help="qaac true VBR value targeting around 256 kbps (default: 96)",
     )
     p_convert.add_argument(
+        "--pcm-codec",
+        dest="pcm_codec",
+        choices=["pcm_s24le", "pcm_f32le", "pcm_s16le"],
+        default=None,
+        help="PCM codec for ffmpeg decode when piping (default from settings)",
+    )
+    p_convert.add_argument(
         "--verify-tags",
         action="store_true",
         help="After tag copy, verify a subset of tags persisted to the MP4",
@@ -710,6 +776,13 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="libfdk_aac/fdkaac VBR quality/mode 1..5 (default from settings)",
+    )
+    p_dir.add_argument(
+        "--pcm-codec",
+        dest="pcm_codec",
+        choices=["pcm_s24le", "pcm_f32le", "pcm_s16le"],
+        default=None,
+        help="PCM codec for ffmpeg decode when piping (default from settings)",
     )
     # Tri-state hash flag: default None, explicit --hash/--no-hash set True/False
     hash_group = p_dir.add_mutually_exclusive_group()
@@ -780,15 +853,25 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init_db()
     if args.cmd == "convert":
         tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
+        pcm_eff = args.pcm_codec if getattr(args, "pcm_codec", None) is not None else cfg.pcm_codec
         ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
         ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
-        return cmd_convert(args.src, args.dest, tvbr_eff, verify_tags=ver_tags_eff, verify_strict=ver_strict_eff, log_json_path=cfg.log_json)
+        return cmd_convert(
+            args.src,
+            args.dest,
+            tvbr_eff,
+            pcm_codec=pcm_eff,
+            verify_tags=ver_tags_eff,
+            verify_strict=ver_strict_eff,
+            log_json_path=cfg.log_json,
+        )
     if args.cmd == "convert-dir":
         tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
         vbr_eff = args.vbr if args.vbr is not None else cfg.vbr
         workers_eff = args.workers if args.workers is not None else (cfg.workers or (os.cpu_count() or 1))
         hash_eff = cfg.hash_streaminfo if args.hash_streaminfo is None else args.hash_streaminfo
         commit_eff = args.commit_batch_size if args.commit_batch_size is not None else cfg.commit_batch_size
+        pcm_eff = args.pcm_codec if getattr(args, "pcm_codec", None) is not None else cfg.pcm_codec
         ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
         ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
         return cmd_convert_dir(
@@ -803,6 +886,7 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force or cfg.force,
             commit_batch_size=commit_eff,
             log_json_path=cfg.log_json,
+            pcm_codec=pcm_eff,
             verify_tags=ver_tags_eff,
             verify_strict=ver_strict_eff,
         )

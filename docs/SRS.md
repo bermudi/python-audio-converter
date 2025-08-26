@@ -72,6 +72,8 @@ Optional (future): CLI parity for headless automation.
 
 FR-16: The system shall emit structured JSON line events (optional) and shall always write a per‑run summary JSON including counts, timing, and verification totals. Log rotation/retention shall be configurable.
 
+FR-17: The system shall allow configuring the PCM decode codec used when piping FFmpeg to external encoders via a setting and CLI flag `--pcm-codec` with choices `pcm_s24le`, `pcm_f32le`, or `pcm_s16le`. The default shall be `pcm_s24le`.
+
 ## 4. Non‑Functional Requirements
 
 NFR-1 Performance: With N workers on an 8‑core CPU and SSD storage, the system should achieve near‑linear scaling up to saturation of CPU or I/O for typical stereo FLACs. Target throughput and CPU utilization thresholds to be finalized in acceptance (§8).
@@ -124,10 +126,10 @@ Assumptions: hashing can be enabled/disabled (performance tradeoff). When disabl
   - Primary (FFmpeg libfdk_aac): include explicit mapping and faststart:
     `-map 0:a:0 -vn -map_metadata 0 -movflags +use_metadata_tags+faststart -c:a libfdk_aac -vbr <q> -threads 1`.
   - Fallback (qaac pipe): decode with explicit mapping and decode intent:
-    `-map 0:a:0 -vn -sn -dn -acodec pcm_s24le -f wav -` piped to `qaac --tvbr <n>`.
+    `-map 0:a:0 -vn -sn -dn -acodec <pcm_codec> -f wav -` piped to `qaac --tvbr <n>`.
   - Fallback (fdkaac pipe): same decode mapping to `fdkaac -m <mode>`.
-  - Default PCM precision is 24‑bit (`pcm_s24le`) to preserve headroom; allow `pcm_f32le` via settings.
-  - Always include `-vn -sn -dn` during decode.
+  - Default PCM precision is 24‑bit (`pcm_s24le`) to preserve headroom; allow `pcm_f32le` or `pcm_s16le` via setting/CLI `--pcm-codec`.
+  - Always include `-vn -sn -dn` during decode and set `-movflags +use_metadata_tags+faststart` for MP4 output.
   - Cover art/tags normalized post‑encode via Mutagen to ensure parity.
 - No resample/channel change unless required by encoder.
 

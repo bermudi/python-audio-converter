@@ -5,12 +5,13 @@ Generated: 2025-08-26 10:48:38 -06:00
 Priority is top-down. Each task has a brief scope and acceptance criteria.
 
 1) Harden encoder invocations: explicit stream mapping, faststart, decode intent
+- Status: Completed (2025-08-26)
 - Why: Prevent accidental multi-stream issues; improve player compatibility; make decode predictable.
 - Scope:
   - Add -map 0:a:0 to all ffmpeg commands (libfdk path and decode-to-WAV).
   - Add -movflags +use_metadata_tags+faststart for MP4 output.
   - Ensure -vn -sn -dn present on decode; keep -threads 1 explicit.
-  - Expose pcm_codec (pcm_s24le vs pcm_f32le) in settings.
+  - Expose pcm_codec (pcm_s24le | pcm_f32le | pcm_s16le) via settings and CLI `--pcm-codec`.
 - Accept: Encodes succeed with first audio stream only; MP4 opens quickly; commands logged include these flags.
 - Refs: src/pac/encoder.py, src/pac/config.py.
 
@@ -124,6 +125,7 @@ What’s already done from your original list
 - Destination sanitization and collision handling: Implemented. sanitize_rel_path and resolve_collisions exist; needs optimization (Task 3).
 - Post-encode tag verification: Implemented with verify-tags and verify-strict; needs stronger copy error handling and normalization (Task 4).
 - GUI scaffold: Implemented minimal PySide6 app with Preflight, plan, convert; needs progress/cancel/pause (Task 9).
+ - Hardened FFmpeg flags and pcm precision selection complete. CLI exposes `--pcm-codec`; run summaries/logs include selected PCM and mapping/faststart are enforced.
 
 Deprioritized or rolled into others
 - CLI progress UI remains important (Task 8), but correctness/perf hardening (Tasks 1–3) should come first on large libraries.

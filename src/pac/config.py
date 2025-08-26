@@ -35,6 +35,10 @@ class PacSettings(BaseSettings):
     # convert-dir defaults
     tvbr: int = Field(default=96, description="qaac true VBR quality (around 256 kbps)")
     vbr: int = Field(default=5, description="libfdk_aac/fdkaac VBR quality 1..5")
+    pcm_codec: str = Field(
+        default="pcm_s24le",
+        description="PCM codec for ffmpeg decode piping (pcm_s24le or pcm_f32le)",
+    )
     workers: Optional[int] = Field(default=None, description="Parallel workers; None=auto (CPU cores)")
     hash_streaminfo: bool = Field(default=False, description="Compute FLAC STREAMINFO MD5 during scan")
     force: bool = Field(default=False, description="Force re-encode regardless of DB state")
@@ -122,6 +126,7 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         "log_json",
         "tvbr",
         "vbr",
+        "pcm_codec",
         "workers",
         "hash_streaminfo",
         "force",

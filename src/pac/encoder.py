@@ -31,17 +31,19 @@ def build_ffmpeg_cmd(src: Path, out_tmp: Path, vbr_quality: int = 5) -> List[str
         "error",
         "-i",
         str(src),
+        "-map",
+        "0:a:0",  # explicit first audio stream only
+        "-vn",  # drop any video streams
         "-map_metadata",
         "0",
         "-movflags",
-        "+use_metadata_tags",
+        "+use_metadata_tags+faststart",  # ensure MP4 opens quickly
         "-c:a",
         "libfdk_aac",
         "-vbr",
         str(vbr_quality),
         "-threads",
         "1",
-        "-vn",
         str(out_tmp),
     ]
 
@@ -79,6 +81,8 @@ def build_ffmpeg_decode_wav_cmd(src: Path, *, pcm_codec: str = "pcm_s24le", thre
         "-dn",
         "-i",
         str(src),
+        "-map",
+        "0:a:0",  # decode only the first audio stream
         "-acodec",
         pcm_codec,
         "-f",
@@ -156,6 +160,8 @@ def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96, *, pcm_codec:
     out_tmp = _temp_out_path(dest)
     ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src, pcm_codec=pcm_codec)
     qaac_cmd = build_qaac_encode_from_stdin_cmd(out_tmp, tvbr=tvbr)
+    logger.debug("Running ffmpeg (decode): {}", cmd_to_string(ffmpeg_cmd))
+    logger.debug("Running qaac: {}", cmd_to_string(qaac_cmd))
 
     p_ff = subprocess.Popen(
         ffmpeg_cmd,
@@ -242,6 +248,8 @@ def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5, *, pcm_c
     out_tmp = _temp_out_path(dest)
     ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src, pcm_codec=pcm_codec)
     fdkaac_cmd = build_fdkaac_encode_from_stdin_cmd(out_tmp, vbr_mode=vbr_mode)
+    logger.debug("Running ffmpeg (decode): {}", cmd_to_string(ffmpeg_cmd))
+    logger.debug("Running fdkaac: {}", cmd_to_string(fdkaac_cmd))
 
     p_ff = subprocess.Popen(
         ffmpeg_cmd,
