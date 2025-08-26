@@ -36,7 +36,7 @@ from pac.scanner import scan_flac_files  # noqa: E402
 from pac.scheduler import WorkerPool  # noqa: E402
 from pac.planner import plan_changes  # noqa: E402
 from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
-from pac.paths import resolve_collisions  # noqa: E402
+from pac.paths import resolve_collisions, sanitize_rel_path  # noqa: E402
 
 
 EXIT_OK = 0
@@ -291,6 +291,7 @@ def cmd_convert_dir(
     verbose: bool,
     dry_run: bool,
     force: bool,
+    mode: str,
     commit_batch_size: int,
     log_json_path: Optional[str] = None,
     pcm_codec: str = "pcm_s24le",
@@ -338,6 +339,48 @@ def cmd_convert_dir(
     t_db_s = time.time()
     conn = pac_db.connect()
     try:
+        # Reconcile destination: pre-populate DB for sources with existing outputs
+        reconciled_srcs: set[Path] = set()
+        existing: set[Path] = set()
+        if mode == "reconcile":
+            # Build set of existing relative output paths under out_root
+            for dirpath, _, filenames in os.walk(out_root):
+                d = Path(dirpath)
+                for fn in filenames:
+                    try:
+                        rel = (d / fn).relative_to(out_root)
+                    except Exception:
+                        continue
+                    existing.add(rel)
+            # Upsert DB entries for sources whose expected output already exists
+            for sf in files:
+                out_rel = sanitize_rel_path(sf.rel_path, final_suffix=".m4a")
+                if out_rel in existing:
+                    try:
+                        pac_db.upsert_file(
+                            conn,
+                            src_path=str(sf.path),
+                            rel_path=str(sf.rel_path),
+                            size=sf.size or 0,
+                            mtime_ns=sf.mtime_ns or 0,
+                            flac_md5=sf.flac_md5,
+                            output_rel=str(out_rel),
+                            encoder=(
+                                "qaac"
+                                if selected_encoder == "qaac"
+                                else ("fdkaac" if selected_encoder == "fdkaac" else "libfdk_aac")
+                            ),
+                            vbr_quality=(tvbr if selected_encoder == "qaac" else vbr),
+                            container="m4a",
+                        )
+                        reconciled_srcs.add(sf.path)
+                    except Exception:
+                        pass
+            try:
+                conn.commit()
+            except Exception:
+                pass
+
         db_idx = pac_db.fetch_files_index(conn)
         d_db = time.time() - t_db_s
         t_plan_s = time.time()
@@ -361,7 +404,7 @@ def cmd_convert_dir(
         f"Selected encoder: {selected_encoder} | Quality: "
         f"{(tvbr if selected_encoder=='qaac' else vbr)}"
         f" | PCM: {pcm_codec} | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
-        f" | Force: {'on' if force else 'off'}"
+        f" | Force: {'on' if force else 'off'} | Mode: {mode}"
     )
     # Show encoder binary path for transparency
     if selected_encoder == "libfdk_aac":
@@ -422,6 +465,7 @@ def cmd_convert_dir(
         "workers": max_workers,
         "hash": bool(hash_streaminfo),
         "force": bool(force),
+        "mode": mode,
         "ffmpeg_path": getattr(st, "ffmpeg_path", None),
         "ffmpeg_version": getattr(st, "ffmpeg_version", None),
         "qaac_version": getattr(st_qaac, "qaac_version", None) if st_qaac is not None else None,
@@ -447,7 +491,7 @@ def cmd_convert_dir(
                         run_id=run_id,
                         src_path=str(pi.src_path),
                         status="skipped",
-                        reason=pi.reason,
+                        reason=("reconciled" if (mode == "reconcile" and 'reconciled_srcs' in locals() and pi.src_path in reconciled_srcs) else pi.reason),
                         elapsed_ms=None,
                     )
             pac_db.finish_run(
@@ -493,26 +537,158 @@ def cmd_convert_dir(
     done = 0
     since_commit = 0
 
-    # First, persist all skipped items as file_runs (status=skipped)
-    for pi in unchanged:
+    # Optional: sync-tags mode processes unchanged items with tag copy + verify
+    tag_sync_processed = 0
+    tag_sync_ok = 0
+    tag_sync_warn = 0
+    tag_sync_failed = 0
+
+    if mode == "force-rebuild" and not dry_run:
+        # Safety confirmation
         try:
-            pac_db.insert_file_run(
-                conn,
-                run_id=run_id,
-                src_path=str(pi.src_path),
-                status="skipped",
-                reason=pi.reason,
-                elapsed_ms=None,
-            )
-            since_commit += 1
+            prompt = f"Force rebuild will re-encode {len(plan)} files. Continue? [y/N]: "
+            resp = input(prompt)
+            if str(resp).strip().lower() not in {"y", "yes"}:
+                logger.warning("Force rebuild cancelled by user")
+                pac_db.finish_run(
+                    conn,
+                    run_id,
+                    finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    stats={
+                        "planned": len(plan),
+                        "to_convert": len(to_convert),
+                        "unchanged": len(unchanged),
+                        "converted": 0,
+                        "failed": 0,
+                    },
+                )
+                conn.commit()
+                return EXIT_OK
         except Exception:
             pass
-    if since_commit:
-        try:
-            conn.commit()
-            since_commit = 0
-        except Exception:
-            pass
+
+    if mode == "sync-tags":
+        bound = max(1, max_workers * 2)
+        stop_event = threading.Event()
+
+        def _tag_task(pi):
+            dp = out_root / pi.output_rel
+            t0 = time.time()
+            try:
+                copy_tags_flac_to_mp4(pi.src_path, dp)
+                disc = []
+                status = "ok"
+                if verify_tags:
+                    try:
+                        disc = verify_tags_flac_vs_mp4(pi.src_path, dp)
+                    except Exception as e:
+                        disc = [f"verify-exception: {e}"]
+                    status = "ok" if not disc else ("failed" if verify_strict else "warn")
+                return (pi, 0, int((time.time() - t0) * 1000), status, disc)
+            except Exception as e:
+                return (pi, 1, int((time.time() - t0) * 1000), "failed", [f"exception: {e}"])
+
+        for pi, rc_ms_status in pool.imap_unordered_bounded(_tag_task, unchanged, max_pending=bound, stop_event=stop_event):
+            # Unpack
+            _, rc, elapsed_ms, status, disc = rc_ms_status if isinstance(rc_ms_status, tuple) else (None, 1, 0, "failed", ["bad-return"])
+            tag_sync_processed += 1
+            try:
+                reason = f"sync-tags: {status}" + (f" | {', '.join(disc)}" if disc else "")
+                pac_db.insert_file_run(
+                    conn,
+                    run_id=run_id,
+                    src_path=str(pi.src_path),
+                    status="skipped",
+                    reason=reason,
+                    elapsed_ms=elapsed_ms,
+                )
+                since_commit += 1
+            except Exception:
+                pass
+            if status == "ok":
+                tag_sync_ok += 1
+            elif status == "warn":
+                tag_sync_warn += 1
+            else:
+                tag_sync_failed += 1
+            if since_commit >= max(1, commit_batch_size):
+                try:
+                    conn.commit()
+                    since_commit = 0
+                except Exception:
+                    pass
+        # After processing, do not double-insert skipped entries for unchanged
+    else:
+        # Persist skipped items (unchanged) as file_runs
+        for pi in unchanged:
+            try:
+                pac_db.insert_file_run(
+                    conn,
+                    run_id=run_id,
+                    src_path=str(pi.src_path),
+                    status="skipped",
+                    reason=("reconciled" if (mode == "reconcile" and 'reconciled_srcs' in locals() and pi.src_path in reconciled_srcs) else pi.reason),
+                    elapsed_ms=None,
+                )
+                since_commit += 1
+            except Exception:
+                pass
+        if since_commit:
+            try:
+                conn.commit()
+                since_commit = 0
+            except Exception:
+                pass
+    # In sync-tags mode, do not perform any re-encoding; mark would-be converts as skipped.
+    if mode == "sync-tags":
+        for pi in to_convert:
+            try:
+                pac_db.insert_file_run(
+                    conn,
+                    run_id=run_id,
+                    src_path=str(pi.src_path),
+                    status="skipped",
+                    reason="sync-tags: no-encode",
+                    elapsed_ms=None,
+                )
+                since_commit += 1
+            except Exception:
+                pass
+        if since_commit:
+            try:
+                conn.commit()
+                since_commit = 0
+            except Exception:
+                pass
+        # Prevent the encoding loop from running any work
+        to_convert = []
+    # In reconcile mode, only convert missing outputs; skip items whose output already exists
+    elif mode == "reconcile":
+        if 'existing' in locals() and existing:
+            still_convert = []
+            for pi in to_convert:
+                try:
+                    if Path(pi.output_rel) in existing:
+                        pac_db.insert_file_run(
+                            conn,
+                            run_id=run_id,
+                            src_path=str(pi.src_path),
+                            status="skipped",
+                            reason="reconcile: existing-output",
+                            elapsed_ms=None,
+                        )
+                        since_commit += 1
+                    else:
+                        still_convert.append(pi)
+                except Exception:
+                    still_convert.append(pi)
+            if since_commit:
+                try:
+                    conn.commit()
+                    since_commit = 0
+                except Exception:
+                    pass
+            to_convert = still_convert
     # Bounded processing via WorkerPool to keep <= ~2x workers in flight
     bound = max(1, max_workers * 2)
     stop_event = threading.Event()  # Hook for future GUI pause/cancel
@@ -655,6 +831,7 @@ def cmd_convert_dir(
         "workers": max_workers,
         "hash": bool(hash_streaminfo),
         "force": bool(force),
+        "mode": mode,
         "counts": {
             "planned": total,
             "to_convert": len(to_convert),
@@ -671,6 +848,12 @@ def cmd_convert_dir(
             "warn": int(ver_warn),
             "failed": int(ver_failed),
         },
+        "tag_sync": {
+            "processed": int(tag_sync_processed),
+            "ok": int(tag_sync_ok),
+            "warn": int(tag_sync_warn),
+            "failed": int(tag_sync_failed),
+        } if mode == "sync-tags" else None,
         "timing_s": {
             "total": round(d_total, 3),
             "preflight": round(d_preflight, 3),
@@ -814,10 +997,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show plan (convert/skip/reasons) and exit without encoding",
     )
-    p_dir.add_argument(
+    mode_group = p_dir.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--force",
         action="store_true",
-        help="Re-encode all scanned files regardless of DB state",
+        help="Re-encode all scanned files regardless of DB state (deprecated; use --mode force-rebuild)",
+    )
+    mode_group.add_argument(
+        "--mode",
+        dest="mode",
+        choices=["incremental", "reconcile", "sync-tags", "force-rebuild"],
+        default=None,
+        help="Operation mode: incremental (default), reconcile destination, sync-tags, or force-rebuild",
     )
     p_dir.add_argument(
         "--commit-batch-size",
@@ -876,6 +1067,17 @@ def main(argv: list[str] | None = None) -> int:
         pcm_eff = args.pcm_codec if getattr(args, "pcm_codec", None) is not None else cfg.pcm_codec
         ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
         ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
+        # Derive effective mode and force: --mode overrides legacy --force; fall back to config
+        if getattr(args, "mode", None):
+            mode_eff = args.mode
+            force_eff = True if args.mode == "force-rebuild" else False
+        else:
+            if args.force or cfg.force:
+                mode_eff = "force-rebuild"
+                force_eff = True
+            else:
+                mode_eff = getattr(cfg, "mode", "incremental")
+                force_eff = True if mode_eff == "force-rebuild" else False
         return cmd_convert_dir(
             args.in_dir,
             args.out_dir,
@@ -885,7 +1087,8 @@ def main(argv: list[str] | None = None) -> int:
             hash_streaminfo=hash_eff,
             verbose=args.verbose,
             dry_run=args.dry_run,
-            force=args.force or cfg.force,
+            force=force_eff,
+            mode=mode_eff,
             commit_batch_size=commit_eff,
             log_json_path=cfg.log_json,
             pcm_codec=pcm_eff,

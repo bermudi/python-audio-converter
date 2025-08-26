@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +42,10 @@ class PacSettings(BaseSettings):
     workers: Optional[int] = Field(default=None, description="Parallel workers; None=auto (CPU cores)")
     hash_streaminfo: bool = Field(default=False, description="Compute FLAC STREAMINFO MD5 during scan")
     force: bool = Field(default=False, description="Force re-encode regardless of DB state")
+    mode: Literal["incremental", "reconcile", "sync-tags", "force-rebuild"] = Field(
+        default="incremental",
+        description="Operation mode: incremental (default), reconcile, sync-tags, or force-rebuild",
+    )
     commit_batch_size: int = Field(default=32, description="Batch DB commits per N files")
     verify_tags: bool = Field(default=False, description="After tag copy, verify a subset of tags were persisted")
     verify_strict: bool = Field(default=False, description="Treat any verification discrepancy as a failure")
@@ -130,6 +134,7 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         "workers",
         "hash_streaminfo",
         "force",
+        "mode",
         "commit_batch_size",
         "verify_tags",
         "verify_strict",
