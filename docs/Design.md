@@ -184,12 +184,40 @@ Components:
 - Exit codes per SRS.
  - Event types include: `preflight`, `scan`, `plan`, `encode`, `verify` (when enabled).
 
+### 3.11 Operation Modes
+
+- Incremental (default): Current behavior based on Planner decisions (§3.4/§6). Convert only new/changed (stale) items and update DB.
+
+- Reconcile destination (no re-encode for existing outputs):
+  - Input: source root and destination root.
+  - Action: For each scanned source file, compute expected output path (template §7). If the output file exists at destination but DB lacks an entry or is out-of-date, upsert a `files` row to reflect it as converted without running the encoder.
+  - DB policy: Set `output_rel` deterministically; set `last_converted_at` to the destination file mtime; record current encoder settings in `files` for consistency going forward.
+  - Planning: Schedule encodes only for sources with missing outputs or stale sources per change detection (§6). Log a `reconcile` event per file indicating `found|inserted|skipped`.
+  - Verification (optional): When `--verify-tags` is enabled and destination is mounted, optionally open MP4 to confirm container and minimal tag presence; discrepancies are warnings in reconcile mode.
+
+- Metadata sync (tags/art only) + incremental convert:
+  - Input: source root and destination root.
+  - Action: For sources whose expected outputs exist, open both FLAC and MP4 and synchronize tags and cover art in place (no audio re-encode). Idempotent:
+    - Normalize tags (Unicode NFC, whitespace trim) before comparison (§3.6 rules).
+    - Write only when differences exist; emit `tags` events with status `ok|updated|warn|error`.
+  - Planning: Missing or stale sources are still scheduled for full encode. Existing outputs get a lightweight "tag-sync" job.
+  - Policy: With `--verify-strict`, any tag copy/verify discrepancy marks the file as failed for the run.
+
+- Force full rebuild:
+  - Action: Ignore DB staleness decisions and existing destination files; schedule all sources for re-encode and overwrite outputs atomically (§3.5 output workflow).
+  - Safety: Require explicit CLI flag and GUI confirmation.
+  - DB: Update/replace `files` rows after successful writes; `file_runs` captures reasons and elapsed as usual.
+
+CLI/GUI surfacing:
+- CLI proposal: `--mode {incremental|reconcile|sync-tags|force-rebuild}` (default `incremental`). Mutually exclusive with legacy `--force` if present.
+- GUI: Mode dropdown on the Convert view with a brief description and a confirmation dialog for Force Rebuild.
+
 ## 4. Concurrency & Performance
 - Each encode uses `-threads 1` to make throughput mostly proportional to number of workers; avoid CPU oversubscription.
 - I/O considerations: stagger job start, prefer sequential writes by limiting concurrent outputs or by randomizing start order to avoid hot directories.
 - Temp files: write to same filesystem as destination to keep atomic rename cheap.
 - Large libraries: use incremental commits to DB; wrap batches in transactions for performance.
- - Task submission is bounded (~2×workers) to maintain a stable memory/FD footprint on catalogs with ≥100k files.
+- Task submission is bounded (~2×workers) to maintain a stable memory/FD footprint on catalogs with ≥100k files.
 
 ## 5. FFmpeg Invocation Details
 - Base command template (preferred, libfdk_aac):

@@ -74,6 +74,12 @@ FR-16: The system shall emit structured JSON line events (optional) and shall al
 
 FR-17: The system shall allow configuring the PCM decode codec used when piping FFmpeg to external encoders via a setting and CLI flag `--pcm-codec` with choices `pcm_s24le`, `pcm_f32le`, or `pcm_s16le`. The default shall be `pcm_s24le`.
 
+FR-18: Reconcile destination mode: Given a source directory and destination directory, the system shall detect already-converted outputs that exist at the destination (by applying the output path template to source relpaths) and update the local state DB to reflect them as converted without re-encoding. Only missing or stale source files shall be scheduled for encoding.
+
+FR-19: Metadata sync mode: Given a source directory and destination directory, the system shall, for tracks whose outputs already exist, update MP4 tags and cover art in place to match the source FLAC without re-encoding, and convert only missing or stale items. Tag sync outcomes (ok/warn/error) shall be logged and reflected in the run summary, and verification shall honor `--verify-tags` and `--verify-strict` policies.
+
+FR-20: Force full rebuild mode: The system shall support a mode that converts all source tracks regardless of DB state and existing outputs, overwriting destination files as needed, and updating the state DB after completion. The CLI/GUI shall include a guard (e.g., confirmation prompt) to prevent accidental mass re-encodes.
+
 ## 4. Non‑Functional Requirements
 
 NFR-1 Performance: With N workers on an 8‑core CPU and SSD storage, the system should achieve near‑linear scaling up to saturation of CPU or I/O for typical stereo FLACs. Target throughput and CPU utilization thresholds to be finalized in acceptance (§8).

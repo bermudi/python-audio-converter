@@ -128,3 +128,31 @@ What’s already done from your original list
 
 Deprioritized or rolled into others
 - CLI progress UI remains important (Task 8), but correctness/perf hardening (Tasks 1–3) should come first on large libraries.
+
+[ ] # 16. Mode: Reconcile destination (update DB; convert missing)
+- Why: SRS FR‑18. When destination already contains many converted files (e.g., prior runs or copies), avoid re‑encoding and align the local DB.
+- Scope:
+  - Add planner/runner support for `--mode reconcile` (or GUI dropdown). For each source, compute expected `output_rel` and check `dst_root/output_rel` exists.
+  - If exists and DB has no row or is out-of-date, upsert `files` with `output_rel`, `size`, `mtime`, and set `last_converted_at` from destination mtime. Record current encoder settings.
+  - Schedule encodes only for missing outputs or stale sources per §6 change detection. Emit structured `reconcile` events: status `found|inserted|skipped`.
+- Accept: On a library where 90% of outputs already exist, the run updates DB for those and only encodes the remaining 10%; summary shows counts for reconciled vs encoded.
+- Refs: `src/pac/planner.py`, `src/pac/db.py`, `main.py` (CLI), `app/gui/main.py`.
+
+[ ] # 17. Mode: Metadata sync for existing outputs + convert missing
+- Why: SRS FR‑19. Ensure tag parity without re‑encoding; useful after tag edits on FLACs.
+- Scope:
+  - Implement `--mode sync-tags` (GUI option). For each source with existing output, open FLAC and MP4 and synchronize tags/cover art in place.
+  - Reuse/extend `src/pac/metadata.py` normalization (Unicode NFC, whitespace). Only write when differences detected.
+  - Emit `tags` events with `ok|updated|warn|error`. Respect `--verify-tags` and `--verify-strict` when verifying after sync.
+  - Missing or stale sources are planned for normal encode.
+- Accept: On a corpus with updated FLAC tags, MP4s are updated in place; summary reports numbers of updated vs unchanged; strict mode fails files with tag discrepancies.
+- Refs: `src/pac/metadata.py`, `src/pac/planner.py`, `main.py`, `app/gui/main.py`.
+
+[ ] # 18. Mode: Force full rebuild (convert all; overwrite; update DB)
+- Why: SRS FR‑20. Recreate outputs under new encoder settings or quality.
+- Scope:
+  - Implement `--mode force-rebuild` (GUI guarded action). Planner schedules all sources regardless of DB; encoder overwrites destination atomically per §3.5.
+  - Add confirmation prompt in CLI/GUI; include encoder and quality in the prompt text.
+  - After success, upsert `files` with new `encoder`, `vbr_quality`, `container`, `size`, `mtime`, and `last_converted_at`; record per-file in `file_runs`.
+- Accept: All inputs are re‑encoded; previous outputs replaced; DB reflects new settings; summary shows total re-encoded count equals scanned count.
+- Refs: `src/pac/planner.py`, `src/pac/encoder.py`, `src/pac/db.py`, `main.py`, `app/gui/main.py`.
