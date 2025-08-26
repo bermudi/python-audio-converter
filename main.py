@@ -187,10 +187,18 @@ def _encode_one(
     if rc != 0:
         return rc, "failed"
 
+    # Metadata copy and verification
     try:
         copy_tags_flac_to_mp4(src_p, dest_p)
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"Metadata copy failed: {e}")
+        logger.bind(action="tags", file=str(src_p.name), status="ok").info("tags copy ok")
+    except Exception as e:
+        reason = f"copy-exception: {e}"
+        logger.bind(action="tags", file=str(src_p.name), status="error", reason=reason).error("tags copy failed")
+        if verify_strict:
+            return 1, "failed"
+        # If not strict, this is a warning. We can't reasonably verify, so we are done with this file.
+        return 0, "warn"  # Return success code, but with a warning status.
+
     ver_status = "skipped"
     if verify_tags:
         try:
@@ -198,9 +206,14 @@ def _encode_one(
         except Exception as e:
             disc = [f"verify-exception: {e}"]
         ver_status = "ok" if not disc else ("failed" if verify_strict else "warn")
-        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log("WARNING" if disc else "INFO", "verify complete")
+        level = "INFO"
+        if ver_status == "failed":
+            level = "ERROR"
+        elif ver_status == "warn":
+            level = "WARNING"
+        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log(level, "verify complete")
         if disc and verify_strict:
-            return 1, ver_status
+            return 1, "failed"
     return 0, ver_status
 
 
@@ -237,10 +250,18 @@ def _encode_one_selected(
         logger.error(f"Unknown encoder: {encoder}")
         return 1, "failed"
 
+    # Metadata copy and verification
     try:
         copy_tags_flac_to_mp4(src_p, dest_p)
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"Metadata copy failed: {e}")
+        logger.bind(action="tags", file=str(src_p.name), status="ok").info("tags copy ok")
+    except Exception as e:
+        reason = f"copy-exception: {e}"
+        logger.bind(action="tags", file=str(src_p.name), status="error", reason=reason).error("tags copy failed")
+        if verify_strict:
+            return 1, "failed"
+        # If not strict, this is a warning. We can't reasonably verify, so we are done with this file.
+        return 0, "warn"  # Return success code, but with a warning status.
+
     ver_status = "skipped"
     if verify_tags:
         try:
@@ -248,9 +269,14 @@ def _encode_one_selected(
         except Exception as e:
             disc = [f"verify-exception: {e}"]
         ver_status = "ok" if not disc else ("failed" if verify_strict else "warn")
-        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log("WARNING" if disc else "INFO", "verify complete")
+        level = "INFO"
+        if ver_status == "failed":
+            level = "ERROR"
+        elif ver_status == "warn":
+            level = "WARNING"
+        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log(level, "verify complete")
         if disc and verify_strict:
-            return 1, ver_status
+            return 1, "failed"
     return 0, ver_status
 
 

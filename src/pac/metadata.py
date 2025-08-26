@@ -171,8 +171,14 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path) -> None:
     m.save()
 
 
-def _norm_str(v: Optional[str]) -> str:
-    return (v or "").strip()
+import unicodedata
+
+
+def _norm_str_nfc(v: Optional[str]) -> str:
+    """Normalize string to NFC and strip whitespace."""
+    if v is None:
+        return ""
+    return unicodedata.normalize("NFC", str(v)).strip()
 
 
 def _first_year(s: Optional[str]) -> Optional[str]:
@@ -188,7 +194,8 @@ def verify_tags_flac_vs_mp4(src_flac: Path, dst_mp4: Path) -> list[str]:
 
     Returns a list of discrepancy messages. Empty list means OK.
     Compared fields: title, artist, album, albumartist, track/disc numbers,
-    date/year (by year), genre, and cover presence (if source had art).
+    date/year (by year), genre, composer, compilation, and cover presence.
+    All string comparisons use Unicode NFC normalization.
     """
     from mutagen.flac import FLAC
     from mutagen.mp4 import MP4
@@ -213,15 +220,23 @@ def verify_tags_flac_vs_mp4(src_flac: Path, dst_mp4: Path) -> list[str]:
             return None
 
     checks = [
-        ("title", _norm_str(first("title")), _norm_str((m.tags.get("\xa9nam") or [""])[0] if m.tags else "")),
-        ("artist", _norm_str(first("artist")), _norm_str((m.tags.get("\xa9ART") or [""])[0] if m.tags else "")),
-        ("album", _norm_str(first("album")), _norm_str((m.tags.get("\xa9alb") or [""])[0] if m.tags else "")),
-        ("albumartist", _norm_str(first("albumartist")), _norm_str((m.tags.get("aART") or [""])[0] if m.tags else "")),
-        ("genre", _norm_str(first("genre")), _norm_str((m.tags.get("\xa9gen") or [""])[0] if m.tags else "")),
+        ("title", _norm_str_nfc(first("title")), _norm_str_nfc((m.tags.get("\xa9nam") or [""])[0] if m.tags else "")),
+        ("artist", _norm_str_nfc(first("artist")), _norm_str_nfc((m.tags.get("\xa9ART") or [""])[0] if m.tags else "")),
+        ("album", _norm_str_nfc(first("album")), _norm_str_nfc((m.tags.get("\xa9alb") or [""])[0] if m.tags else "")),
+        ("albumartist", _norm_str_nfc(first("albumartist")), _norm_str_nfc((m.tags.get("aART") or [""])[0] if m.tags else "")),
+        ("genre", _norm_str_nfc(first("genre")), _norm_str_nfc((m.tags.get("\xa9gen") or [""])[0] if m.tags else "")),
+        ("composer", _norm_str_nfc(first("composer")), _norm_str_nfc((m.tags.get("\xa9wrt") or [""])[0] if m.tags else "")),
     ]
     for field, exp, got in checks:
         if exp and exp != got:
             disc.append(f"{field}: expected='{exp}' got='{got}'")
+
+    # Compilation flag
+    comp_str = (first("compilation") or "0").strip()
+    exp_comp = comp_str in {"1", "true", "True", "yes", "Yes"}
+    got_comp = (m.tags.get("cpil") or [False])[0] if m.tags else False
+    if exp_comp and not got_comp:
+        disc.append(f"compilation: expected='true' got='{str(got_comp).lower()}'")
 
     # Date/Year by leading year
     exp_year = _first_year(first("date") or first("year"))
