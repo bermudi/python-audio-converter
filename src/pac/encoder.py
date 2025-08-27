@@ -129,6 +129,61 @@ def encode_with_ffmpeg_libfdk(src: Path, dest: Path, *, vbr_quality: int = 5) ->
     return 0
 
 
+def build_ffmpeg_opus_cmd(src: Path, out_tmp: Path, vbr_kbps: int = 160) -> List[str]:
+    """Build FFmpeg command to encode a file to Opus."""
+    return [
+        "ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-map_metadata",
+        "0",
+        "-c:a",
+        "libopus",
+        "-vbr",
+        "on",
+        "-b:a",
+        f"{vbr_kbps}k",
+        "-threads",
+        "1",
+        "-f",
+        "opus",
+        str(out_tmp),
+    ]
+
+
+def encode_with_ffmpeg_libopus(src: Path, dest: Path, *, vbr_kbps: int = 160) -> int:
+    """Encode using ffmpeg/libopus writing atomically to dest."""
+    out_tmp = _temp_out_path(dest)
+    cmd = build_ffmpeg_opus_cmd(src, out_tmp, vbr_kbps=vbr_kbps)
+    logger.debug("Running ffmpeg: {}", cmd_to_string(cmd))
+    rc = run_ffmpeg(cmd)
+    if rc != 0:
+        try:
+            if out_tmp.exists():
+                out_tmp.unlink()
+        except Exception:
+            pass
+        return rc
+    try:
+        os.replace(str(out_tmp), str(dest))
+    except Exception as e:
+        logger.error(f"Rename failed: {e}")
+        try:
+            if out_tmp.exists():
+                out_tmp.unlink()
+        except Exception:
+            pass
+        return 1
+    return 0
+
+
 def build_qaac_encode_from_stdin_cmd(out_path: Path, tvbr: int = 96, extra_args: Optional[List[str]] = None) -> List[str]:
     """Build qaac command to read WAV from stdin and write M4A.
 

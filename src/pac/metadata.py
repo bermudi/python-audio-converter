@@ -171,6 +171,63 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path) -> None:
     m.save()
 
 
+def copy_tags_flac_to_opus(src_flac: Path, dst_opus: Path) -> None:
+    """Copy all Vorbis comments and cover art from FLAC to Opus."""
+    from mutagen.flac import FLAC, Picture
+    from mutagen.oggopus import OggOpus
+
+    f = FLAC(str(src_flac))
+    o = OggOpus(str(dst_opus))
+
+    # Copy all text tags
+    for k, v in f.tags.items():
+        o.tags[k] = v
+
+    # Cover art
+    img_data = _first_front_cover(f)
+    if img_data:
+        pic = Picture()
+        pic.data = img_data
+        # Try to guess format from magic bytes
+        if img_data.startswith(b"\xff\xd8\xff"):
+            pic.mime = "image/jpeg"
+        elif img_data.startswith(b"\x89PNG\r\n\x1a\n"):
+            pic.mime = "image/png"
+
+        # OggOpus expects METADATA_BLOCK_PICTURE to be a base64 string
+        o.tags["METADATA_BLOCK_PICTURE"] = base64.b64encode(pic.write()).decode("ascii")
+
+    o.save()
+
+
+def verify_tags_flac_vs_opus(src_flac: Path, dst_opus: Path) -> list[str]:
+    """Verify a subset of tags and cover presence persisted FLAC -> Opus.
+
+    Returns a list of discrepancy messages. Empty list means OK.
+    """
+    from mutagen.flac import FLAC
+    from mutagen.oggopus import OggOpus
+
+    f = FLAC(str(src_flac))
+    o = OggOpus(str(dst_opus))
+    disc: list[str] = []
+
+    # Cover art
+    had_cover = _first_front_cover(f) is not None
+    has_cover = "metadata_block_picture" in o.tags or "coverart" in o.tags
+    if had_cover and not has_cover:
+        disc.append("cover: missing")
+
+    # Compare a few common tags
+    for key in ["title", "artist", "album", "tracknumber"]:
+        exp = (f.tags.get(key) or [None])[0]
+        got = (o.tags.get(key) or [None])[0]
+        if exp and exp != got:
+            disc.append(f"{key}: expected='{exp}' got='{got}'")
+
+    return disc
+
+
 import unicodedata
 
 

@@ -22,8 +22,8 @@ class PlanItem:
     src_path: Path
     rel_path: Path
     output_rel: Path
-    vbr_quality: int = 5
-    encoder: str = "libfdk_aac"
+    vbr_quality: int
+    encoder: str
     size: int | None = None
     mtime_ns: int | None = None
     flac_md5: str | None = None
@@ -33,7 +33,9 @@ def plan_changes(
     scanned: Iterable[SourceFile],
     db_index: dict[str, "sqlite3.Row"],
     *,
+    codec: str = "aac",
     vbr_quality: int = 5,
+    opus_vbr_kbps: int = 160,
     encoder: str = "libfdk_aac",
     force: bool = False,
 ) -> List[PlanItem]:
@@ -42,8 +44,11 @@ def plan_changes(
     plan: List[PlanItem] = []
     for sf in scanned:
         prev = db_index.get(str(sf.path))
-        # Sanitize destination relative path and enforce .m4a suffix
-        out_rel = sanitize_rel_path(sf.rel_path, final_suffix=".m4a")
+
+        suffix = ".opus" if codec == "opus" else ".m4a"
+        quality = opus_vbr_kbps if codec == "opus" else vbr_quality
+
+        out_rel = sanitize_rel_path(sf.rel_path, final_suffix=suffix)
         reason = ""
         if force:
             decision: Decision = "convert"
@@ -60,7 +65,7 @@ def plan_changes(
                     reasons.append("mtime")
                 if prev["flac_md5"] and sf.flac_md5 and prev["flac_md5"] != sf.flac_md5:
                     reasons.append("md5")
-                if prev["vbr_quality"] != vbr_quality:
+                if prev["vbr_quality"] != quality:
                     reasons.append("quality")
                 if prev["encoder"] != encoder:
                     reasons.append("encoder")
@@ -77,7 +82,7 @@ def plan_changes(
             src_path=sf.path,
             rel_path=sf.rel_path,
             output_rel=out_rel,
-            vbr_quality=vbr_quality,
+            vbr_quality=quality,
             encoder=encoder,
             size=sf.size,
             mtime_ns=sf.mtime_ns,

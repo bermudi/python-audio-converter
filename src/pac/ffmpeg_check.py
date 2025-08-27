@@ -16,6 +16,7 @@ class FFmpegStatus:
     ffmpeg_path: Optional[str] = None
     ffmpeg_version: Optional[str] = None
     has_libfdk_aac: Optional[bool] = None
+    has_libopus: Optional[bool] = None
     error: Optional[str] = None
 
 
@@ -88,12 +89,14 @@ def probe_ffmpeg() -> FFmpegStatus:
     rc_e, out_e, err_e = _run([path, "-hide_banner", "-encoders"])  # encoders on stdout
     encoders_text = (out_e or "").lower()
     has_fdk = "libfdk_aac" in encoders_text
+    has_opus = "libopus" in encoders_text
 
     status = FFmpegStatus(
         available=(rc_v == 0),
         ffmpeg_path=path,
         ffmpeg_version=version,
         has_libfdk_aac=(has_fdk if rc_e == 0 else False),
+        has_libopus=(has_opus if rc_e == 0 else False),
         error=None if rc_v == 0 else (err_v or "ffmpeg -version failed"),
     )
     return status

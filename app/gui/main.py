@@ -70,11 +70,17 @@ class PreflightWorker(QtCore.QThread):
             st = probe_ffmpeg()
             st_qa = probe_qaac(light=False)
             st_fd = probe_fdkaac()
-            ok = st.available and (st.has_libfdk_aac or st_qa.available or st_fd.available)
+
+            # An encoder is OK if we have a way to encode either AAC or Opus
+            aac_ok = st.available and (st.has_libfdk_aac or st_qa.available or st_fd.available)
+            opus_ok = st.available and st.has_libopus
+            ok = aac_ok or opus_ok
+
             res = {
                 "ffmpeg": st.ffmpeg_version or st.error or "unknown",
                 "ffmpeg_path": st.ffmpeg_path,
                 "libfdk_aac": bool(st.has_libfdk_aac),
+                "libopus": bool(st.has_libopus),
                 "qaac": st_qa.qaac_version if st_qa.available else None,
                 "qaac_path": st_qa.qaac_path,
                 "fdkaac": st_fd.fdkaac_version if st_fd.available else None,
@@ -94,8 +100,10 @@ class ConvertWorker(QtCore.QThread):
         *,
         src_dir: Path,
         out_dir: Path,
+        codec: str,
         tvbr: int,
         vbr: int,
+        opus_vbr_kbps: int,
         workers: int,
         hash_streaminfo: bool,
         verbose: bool,
@@ -109,8 +117,10 @@ class ConvertWorker(QtCore.QThread):
         super().__init__()
         self.src_dir = src_dir
         self.out_dir = out_dir
+        self.codec = codec
         self.tvbr = tvbr
         self.vbr = vbr
+        self.opus_vbr_kbps = opus_vbr_kbps
         self.workers = workers
         self.hash_streaminfo = hash_streaminfo
         self.verbose = verbose
@@ -126,8 +136,10 @@ class ConvertWorker(QtCore.QThread):
             code = cmd_convert_dir(
                 str(self.src_dir),
                 str(self.out_dir),
+                codec=self.codec,
                 tvbr=self.tvbr,
                 vbr=self.vbr,
+                opus_vbr_kbps=self.opus_vbr_kbps,
                 workers=self.workers,
                 hash_streaminfo=self.hash_streaminfo,
                 verbose=self.verbose,
@@ -178,14 +190,18 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Source:", self._wrap_row(src_row))
 
         self.edit_dest = QtWidgets.QLineEdit()
-        self.edit_dest.setPlaceholderText("Destination root for .m4a outputs")
+        self.edit_dest.setPlaceholderText("Destination root for outputs")
         self.btn_dest = QtWidgets.QPushButton("Browse…")
         dest_row = QtWidgets.QHBoxLayout()
         dest_row.addWidget(self.edit_dest)
         dest_row.addWidget(self.btn_dest)
         form.addRow("Destination:", self._wrap_row(dest_row))
 
-        # Settings row (workers, vbr, tvbr, hash, verify)
+        # Settings row
+        self.combo_codec = QtWidgets.QComboBox()
+        self.combo_codec.addItems(["aac", "opus"])
+        self.combo_codec.setCurrentText(self.settings.codec)
+
         self.spin_workers = QtWidgets.QSpinBox()
         self.spin_workers.setRange(1, max(1, (QtCore.QThread.idealThreadCount() or 8)))
         self.spin_workers.setValue(self.settings.workers or (QtCore.QThread.idealThreadCount() or 4))
@@ -193,12 +209,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tvbr = QtWidgets.QSpinBox()
         self.spin_tvbr.setRange(0, 127)
         self.spin_tvbr.setValue(self.settings.tvbr)
-        self.spin_tvbr.setToolTip("Used only when encoder is qaac (tvbr scale, ~256 kbps at ~96)")
+        self.spin_tvbr.setToolTip("Used for AAC encode with qaac (tvbr scale, ~256 kbps at ~96)")
 
         self.spin_vbr = QtWidgets.QSpinBox()
         self.spin_vbr.setRange(1, 5)
         self.spin_vbr.setValue(self.settings.vbr)
-        self.spin_vbr.setToolTip("Used when encoder is libfdk_aac or fdkaac (1..5; 5 ~ 256 kbps)")
+        self.spin_vbr.setToolTip("Used for AAC encode with libfdk_aac or fdkaac (1..5; 5 ~ 256 kbps)")
+
+        self.spin_opus_vbr = QtWidgets.QSpinBox()
+        self.spin_opus_vbr.setRange(32, 512)
+        self.spin_opus_vbr.setValue(self.settings.opus_vbr_kbps)
+        self.spin_opus_vbr.setToolTip("Used for Opus encode (VBR bitrate in kbps)")
 
         self.chk_hash = QtWidgets.QCheckBox("Compute FLAC STREAMINFO MD5 (slower)")
         self.chk_hash.setChecked(self.settings.hash_streaminfo)
@@ -209,15 +230,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_verify_strict.setChecked(self.settings.verify_strict)
 
         grid = QtWidgets.QGridLayout()
-        grid.addWidget(QtWidgets.QLabel("Workers"), 0, 0)
-        grid.addWidget(self.spin_workers, 0, 1)
-        grid.addWidget(QtWidgets.QLabel("qaac tvbr"), 0, 2)
-        grid.addWidget(self.spin_tvbr, 0, 3)
-        grid.addWidget(QtWidgets.QLabel("libfdk/fdkaac vbr"), 0, 4)
-        grid.addWidget(self.spin_vbr, 0, 5)
-        grid.addWidget(self.chk_hash, 1, 0, 1, 3)
-        grid.addWidget(self.chk_verify, 1, 3, 1, 2)
-        grid.addWidget(self.chk_verify_strict, 1, 5, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Codec"), 0, 0)
+        grid.addWidget(self.combo_codec, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Workers"), 0, 2)
+        grid.addWidget(self.spin_workers, 0, 3)
+
+        grid.addWidget(QtWidgets.QLabel("AAC (qaac) tvbr"), 1, 0)
+        grid.addWidget(self.spin_tvbr, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("AAC (libfdk) vbr"), 1, 2)
+        grid.addWidget(self.spin_vbr, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Opus vbr (kbps)"), 1, 4)
+        grid.addWidget(self.spin_opus_vbr, 1, 5)
+
+        grid.addWidget(self.chk_hash, 2, 0, 1, 3)
+        grid.addWidget(self.chk_verify, 2, 3, 1, 2)
+        grid.addWidget(self.chk_verify_strict, 2, 5, 1, 1)
         form.addRow("Settings:", self._wrap_row(grid))
         # Encoder/quality hint labels
         self.lbl_encoder_status = QtWidgets.QLabel("Encoder: unknown")
@@ -252,6 +279,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_dest.clicked.connect(lambda: self._pick_dir(self.edit_dest))
         self.btn_plan.clicked.connect(self.on_plan)
         self.btn_convert.clicked.connect(self.on_convert)
+        self.combo_codec.currentTextChanged.connect(self._on_codec_change)
 
         # Logger → UI
         self.log_emitter = LogEmitter()
@@ -289,81 +317,105 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pf.start()
 
     def _on_preflight_ok(self, res: dict) -> None:
+        self.preflight_results = res
         if res.get("ok"):
             txt = (
                 f"ffmpeg: {res.get('ffmpeg')}\n"
-                f"libfdk_aac: {'YES' if res.get('libfdk_aac') else 'NO'}\n"
-                f"qaac: {res.get('qaac') or 'NOT FOUND'}\n"
-                f"fdkaac: {res.get('fdkaac') or 'NOT FOUND'}"
+                f"libfdk_aac: {'YES' if res.get('libfdk_aac') else 'NO'} | "
+                f"libopus: {'YES' if res.get('libopus') else 'NO'} | "
+                f"qaac: {res.get('qaac') or 'NO'} | "
+                f"fdkaac: {res.get('fdkaac') or 'NO'}"
             )
             self.lbl_preflight.setText(txt)
             logger.info("Preflight OK")
-            # Decide encoder exactly like the CLI does
-            enc: Optional[str]
-            if res.get("libfdk_aac"):
-                enc = "libfdk_aac"
-            elif bool(res.get("qaac")):
-                enc = "qaac"
-            elif bool(res.get("fdkaac")):
-                enc = "fdkaac"
-            else:
-                enc = None
-            self.selected_encoder = enc
-            self._apply_encoder_ui(enc)
+            self._on_codec_change(self.combo_codec.currentText())
         else:
-            self.lbl_preflight.setText("No suitable AAC encoder found")
-            logger.error("No AAC encoder available. Install ffmpeg with libfdk_aac, or fdkaac, or qaac.")
+            self.lbl_preflight.setText("No suitable AAC or Opus encoder found")
+            logger.error("No suitable encoder available.")
             self.selected_encoder = None
-            self._apply_encoder_ui(None)
+            self._apply_encoder_ui()
 
     def _on_preflight_err(self, msg: str) -> None:
         self.lbl_preflight.setText(f"Preflight error: {msg}")
         logger.error(f"Preflight error: {msg}")
         self.selected_encoder = None
-        self._apply_encoder_ui(None)
+        self.preflight_results = None
+        self._apply_encoder_ui()
 
-    def _apply_encoder_ui(self, enc: Optional[str]) -> None:
-        """Enable/disable tvbr vs vbr controls and show a hint based on encoder.
+    def _on_codec_change(self, codec: str) -> None:
+        self._apply_encoder_ui()
 
-        enc: one of None, "libfdk_aac", "qaac", "fdkaac".
-        """
-        if enc is None:
+    def _apply_encoder_ui(self) -> None:
+        """Enable/disable quality controls based on selected codec and preflight results."""
+        res = getattr(self, "preflight_results", None)
+        codec = self.combo_codec.currentText()
+
+        # Default to disabled
+        self.spin_tvbr.setEnabled(False)
+        self.spin_vbr.setEnabled(False)
+        self.spin_opus_vbr.setEnabled(False)
+        self.btn_plan.setEnabled(False)
+        self.btn_convert.setEnabled(False)
+
+        if not res or not res.get("ok"):
             self.lbl_encoder_status.setText("unknown (run Preflight)")
-            self.lbl_quality_hint.setText("tvbr (qaac) or vbr (libfdk/fdkaac), depending on availability")
-            self.spin_tvbr.setEnabled(True)
-            self.spin_vbr.setEnabled(True)
+            self.lbl_quality_hint.setText("N/A")
             return
-        self.lbl_encoder_status.setText(enc)
-        if enc == "qaac":
-            self.spin_tvbr.setEnabled(True)
-            self.spin_vbr.setEnabled(False)
-            self.lbl_quality_hint.setText("Using qaac tvbr (only tvbr applies)")
-        else:  # libfdk_aac or fdkaac
-            self.spin_tvbr.setEnabled(False)
-            self.spin_vbr.setEnabled(True)
-            self.lbl_quality_hint.setText("Using VBR for libfdk_aac/fdkaac (only vbr applies)")
 
-    def _gather_params(self) -> tuple[Optional[Path], Optional[Path], int, int, int, bool, bool, bool, int, bool, bool]:
-        src = Path(self.edit_src.text().strip()) if self.edit_src.text().strip() else None
-        dest = Path(self.edit_dest.text().strip()) if self.edit_dest.text().strip() else None
-        tvbr = int(self.spin_tvbr.value())
-        vbr = int(self.spin_vbr.value())
-        workers = int(self.spin_workers.value())
-        hash_streaminfo = bool(self.chk_hash.isChecked())
-        verbose = True
-        dry_run = False
-        commit = int(self.settings.commit_batch_size)
-        verify = bool(self.chk_verify.isChecked())
-        verify_strict = bool(self.chk_verify_strict.isChecked())
-        return src, dest, tvbr, vbr, workers, hash_streaminfo, verbose, dry_run, commit, verify, verify_strict
+        selected_encoder = None
+        if codec == "opus":
+            self.spin_opus_vbr.setEnabled(True)
+            if res.get("libopus"):
+                selected_encoder = "libopus"
+                self.lbl_quality_hint.setText("Using Opus VBR bitrate (kbps)")
+        else:  # aac
+            if res.get("libfdk_aac"):
+                selected_encoder = "libfdk_aac"
+                self.spin_vbr.setEnabled(True)
+                self.lbl_quality_hint.setText("Using VBR for libfdk_aac (1-5)")
+            elif res.get("qaac"):
+                selected_encoder = "qaac"
+                self.spin_tvbr.setEnabled(True)
+                self.lbl_quality_hint.setText("Using TVBR for qaac (0-127)")
+            elif res.get("fdkaac"):
+                selected_encoder = "fdkaac"
+                self.spin_vbr.setEnabled(True)
+                self.lbl_quality_hint.setText("Using VBR for fdkaac (1-5)")
+
+        self.selected_encoder = selected_encoder
+        if selected_encoder:
+            self.lbl_encoder_status.setText(f"{selected_encoder}")
+            self.btn_plan.setEnabled(True)
+            self.btn_convert.setEnabled(True)
+        else:
+            self.lbl_encoder_status.setText(f"No suitable encoder found for {codec}")
+            self.lbl_quality_hint.setText("N/A")
+
+    def _gather_params(self) -> dict:
+        return {
+            "src_dir": Path(self.edit_src.text().strip()) if self.edit_src.text().strip() else None,
+            "out_dir": Path(self.edit_dest.text().strip()) if self.edit_dest.text().strip() else None,
+            "codec": self.combo_codec.currentText(),
+            "tvbr": int(self.spin_tvbr.value()),
+            "vbr": int(self.spin_vbr.value()),
+            "opus_vbr_kbps": int(self.spin_opus_vbr.value()),
+            "workers": int(self.spin_workers.value()),
+            "hash_streaminfo": bool(self.chk_hash.isChecked()),
+            "verbose": True,
+            "dry_run": False,
+            "force": False,
+            "commit_batch_size": int(self.settings.commit_batch_size),
+            "verify_tags": bool(self.chk_verify.isChecked()),
+            "verify_strict": bool(self.chk_verify_strict.isChecked()),
+            "log_json_path": self.settings.log_json,
+        }
 
     def _start_convert(self, *, dry_run: bool) -> None:
         params = self._gather_params()
-        src, dest = params[0], params[1]
-        if not src or not src.exists():
+        if not params["src_dir"] or not params["src_dir"].exists():
             QtWidgets.QMessageBox.warning(self, "Missing Source", "Please select a valid source directory")
             return
-        if not dest:
+        if not params["out_dir"]:
             QtWidgets.QMessageBox.warning(self, "Missing Destination", "Please select a destination directory")
             return
 
@@ -372,22 +424,8 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setEnabled(False)
         self.progress.show()
 
-        src_p, dest_p, tvbr, vbr, workers, hash_streaminfo, verbose, _dry, commit, verify, verify_strict = params
-        self.worker = ConvertWorker(
-            src_dir=src_p,  # type: ignore[arg-type]
-            out_dir=dest_p,  # type: ignore[arg-type]
-            tvbr=tvbr,
-            vbr=vbr,
-            workers=workers,
-            hash_streaminfo=hash_streaminfo,
-            verbose=verbose,
-            dry_run=dry_run,
-            force=False,
-            commit_batch_size=commit,
-            verify_tags=verify,
-            verify_strict=verify_strict,
-            log_json_path=self.settings.log_json,
-        )
+        params["dry_run"] = dry_run
+        self.worker = ConvertWorker(**params)
         self.worker.finished_with_code.connect(self._on_convert_done)
         self.worker.finished.connect(self._reenable_ui)
         self.worker.start()

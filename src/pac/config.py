@@ -33,8 +33,10 @@ class PacSettings(BaseSettings):
     log_json: Optional[str] = Field(default=None, description="Path for structured JSON log file")
 
     # convert-dir defaults
+    codec: Literal["aac", "opus"] = Field(default="aac", description="Target codec")
     tvbr: int = Field(default=96, description="qaac true VBR quality (around 256 kbps)")
     vbr: int = Field(default=5, description="libfdk_aac/fdkaac VBR quality 1..5")
+    opus_vbr_kbps: int = Field(default=160, description="Opus VBR bitrate in kbps")
     pcm_codec: str = Field(
         default="pcm_s24le",
         description="PCM codec for ffmpeg decode piping (pcm_s24le or pcm_f32le)",
@@ -128,8 +130,10 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
     keys = {
         "log_level",
         "log_json",
+        "codec",
         "tvbr",
         "vbr",
+        "opus_vbr_kbps",
         "pcm_codec",
         "workers",
         "hash_streaminfo",

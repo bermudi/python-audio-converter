@@ -29,8 +29,14 @@ from pac.encoder import (  # noqa: E402
     encode_with_ffmpeg_libfdk,
     run_ffmpeg_pipe_to_qaac,
     run_ffmpeg_pipe_to_fdkaac,
+    encode_with_ffmpeg_libopus,
 )
-from pac.metadata import copy_tags_flac_to_mp4, verify_tags_flac_vs_mp4  # noqa: E402
+from pac.metadata import (  # noqa: E402
+    copy_tags_flac_to_mp4,
+    verify_tags_flac_vs_mp4,
+    copy_tags_flac_to_opus,
+    verify_tags_flac_vs_opus,
+)
 from pac import db as pac_db  # noqa: E402
 from pac.scanner import scan_flac_files  # noqa: E402
 from pac.scheduler import WorkerPool  # noqa: E402
@@ -221,20 +227,21 @@ def _encode_one_selected(
     src_p: Path,
     dest_p: Path,
     *,
+    codec: str,
     encoder: str,
     tvbr: int,
     vbr: int,
+    opus_vbr_kbps: int,
     pcm_codec: str,
     verify_tags: bool,
     verify_strict: bool,
 ) -> tuple[int, str]:
-    """Encode using the preselected backend to keep DB planning consistent.
-
-    encoder: one of "libfdk_aac", "qaac", "fdkaac".
-    tvbr: qaac quality scale (e.g., 96 ~ 256 kbps typical).
-    vbr: libfdk_aac/fdkaac quality/mode (1..5; 5 ~ 256 kbps typical).
-    """
-    if encoder == "libfdk_aac":
+    """Encode using the preselected backend to keep DB planning consistent."""
+    if codec == "opus":
+        rc = encode_with_ffmpeg_libopus(src_p, dest_p, vbr_kbps=opus_vbr_kbps)
+        if rc != 0:
+            return rc, "failed"
+    elif encoder == "libfdk_aac":
         rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=vbr)
         if rc != 0:
             return rc, "failed"
@@ -247,25 +254,30 @@ def _encode_one_selected(
         if rc != 0:
             return rc, "failed"
     else:  # pragma: no cover - defensive
-        logger.error(f"Unknown encoder: {encoder}")
+        logger.error(f"Unknown encoder combination: codec={codec}, encoder={encoder}")
         return 1, "failed"
 
     # Metadata copy and verification
     try:
-        copy_tags_flac_to_mp4(src_p, dest_p)
+        if codec == "opus":
+            copy_tags_flac_to_opus(src_p, dest_p)
+        else:
+            copy_tags_flac_to_mp4(src_p, dest_p)
         logger.bind(action="tags", file=str(src_p.name), status="ok").info("tags copy ok")
     except Exception as e:
         reason = f"copy-exception: {e}"
         logger.bind(action="tags", file=str(src_p.name), status="error", reason=reason).error("tags copy failed")
         if verify_strict:
             return 1, "failed"
-        # If not strict, this is a warning. We can't reasonably verify, so we are done with this file.
-        return 0, "warn"  # Return success code, but with a warning status.
+        return 0, "warn"
 
     ver_status = "skipped"
     if verify_tags:
         try:
-            disc = verify_tags_flac_vs_mp4(src_p, dest_p)
+            if codec == "opus":
+                disc = verify_tags_flac_vs_opus(src_p, dest_p)
+            else:
+                disc = verify_tags_flac_vs_mp4(src_p, dest_p)
         except Exception as e:
             disc = [f"verify-exception: {e}"]
         ver_status = "ok" if not disc else ("failed" if verify_strict else "warn")
@@ -284,9 +296,11 @@ def _encode_one_selected_timed(
     src_p: Path,
     dest_p: Path,
     *,
+    codec: str,
     encoder: str,
     tvbr: int,
     vbr: int,
+    opus_vbr_kbps: int,
     pcm_codec: str,
     verify_tags: bool,
     verify_strict: bool,
@@ -296,9 +310,11 @@ def _encode_one_selected_timed(
     rc, ver_status = _encode_one_selected(
         src_p,
         dest_p,
+        codec=codec,
         encoder=encoder,
         tvbr=tvbr,
         vbr=vbr,
+        opus_vbr_kbps=opus_vbr_kbps,
         pcm_codec=pcm_codec,
         verify_tags=verify_tags,
         verify_strict=verify_strict,
@@ -310,8 +326,10 @@ def cmd_convert_dir(
     src_dir: str,
     out_dir: str,
     *,
+    codec: str,
     tvbr: int,
     vbr: int,
+    opus_vbr_kbps: int,
     workers: int | None,
     hash_streaminfo: bool,
     verbose: bool,
@@ -337,21 +355,30 @@ def cmd_convert_dir(
     if not st.available:
         logger.error("ffmpeg not found; cannot convert")
         return EXIT_PREFLIGHT_FAILED
-    if st.has_libfdk_aac:
-        selected_encoder = "libfdk_aac"
-    else:
-        t_probe_qa = time.time(); st_qaac = probe_qaac(); d_probe_qa = time.time() - t_probe_qa
-        if st_qaac.available:
-            selected_encoder = "qaac"
+
+    if codec == "opus":
+        if st.has_libopus:
+            selected_encoder = "libopus"
         else:
-            t_probe_fd = time.time(); st_fdk = probe_fdkaac(); d_probe_fd = time.time() - t_probe_fd
-            if st_fdk.available:
-                selected_encoder = "fdkaac"
+            logger.error("Opus encoding requested, but libopus not found in ffmpeg")
+            return EXIT_PREFLIGHT_FAILED
+    else:  # aac
+        if st.has_libfdk_aac:
+            selected_encoder = "libfdk_aac"
+        else:
+            t_probe_qa = time.time(); st_qaac = probe_qaac(); d_probe_qa = time.time() - t_probe_qa
+            if st_qaac.available:
+                selected_encoder = "qaac"
             else:
-                logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
-                return EXIT_PREFLIGHT_FAILED
+                t_probe_fd = time.time(); st_fdk = probe_fdkaac(); d_probe_fd = time.time() - t_probe_fd
+                if st_fdk.available:
+                    selected_encoder = "fdkaac"
+                else:
+                    logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
+                    return EXIT_PREFLIGHT_FAILED
+
     d_preflight = time.time() - t_preflight_s
-    quality_for_db = tvbr if selected_encoder == "qaac" else vbr
+    quality_for_db = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
 
     # Scan
     t_scan_s = time.time()
@@ -380,7 +407,8 @@ def cmd_convert_dir(
                     existing.add(rel)
             # Upsert DB entries for sources whose expected output already exists
             for sf in files:
-                out_rel = sanitize_rel_path(sf.rel_path, final_suffix=".m4a")
+                final_suffix = ".opus" if codec == "opus" else ".m4a"
+                out_rel = sanitize_rel_path(sf.rel_path, final_suffix=final_suffix)
                 if out_rel in existing:
                     try:
                         pac_db.upsert_file(
@@ -397,7 +425,7 @@ def cmd_convert_dir(
                                 else ("fdkaac" if selected_encoder == "fdkaac" else "libfdk_aac")
                             ),
                             vbr_quality=(tvbr if selected_encoder == "qaac" else vbr),
-                            container="m4a",
+                            container=codec,
                         )
                         reconciled_srcs.add(sf.path)
                     except Exception:
@@ -410,7 +438,15 @@ def cmd_convert_dir(
         db_idx = pac_db.fetch_files_index(conn)
         d_db = time.time() - t_db_s
         t_plan_s = time.time()
-        plan = plan_changes(files, db_idx, vbr_quality=quality_for_db, encoder=selected_encoder, force=force)
+        plan = plan_changes(
+            files,
+            db_idx,
+            codec=codec,
+            vbr_quality=tvbr if selected_encoder == "qaac" else vbr,
+            opus_vbr_kbps=opus_vbr_kbps,
+            encoder=selected_encoder,
+            force=force,
+        )
         d_plan = time.time() - t_plan_s
     finally:
         pass
@@ -418,17 +454,12 @@ def cmd_convert_dir(
     to_convert = [pi for pi in plan if pi.decision == "convert"]
     unchanged = [pi for pi in plan if pi.decision == "skip"]
 
-    # Resolve collisions among planned outputs (and against existing files under out_root)
-    if to_convert:
-        resolved = resolve_collisions([pi.output_rel for pi in to_convert], out_root=out_root)
-        for pi, new_rel in zip(to_convert, resolved):
-            pi.output_rel = new_rel
 
     # Always provide basic run info
     max_workers = workers or (os.cpu_count() or 1)
+    quality_str = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
     logger.info(
-        f"Selected encoder: {selected_encoder} | Quality: "
-        f"{(tvbr if selected_encoder=='qaac' else vbr)}"
+        f"Codec: {codec} | Selected encoder: {selected_encoder} | Quality: {quality_str}"
         f" | PCM: {pcm_codec} | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
         f" | Force: {'on' if force else 'off'} | Mode: {mode}"
     )
@@ -485,8 +516,9 @@ def cmd_convert_dir(
     settings = {
         "source": str(src_root),
         "dest": str(out_root),
+        "codec": codec,
         "encoder": selected_encoder,
-        "quality": tvbr if selected_encoder == "qaac" else vbr,
+        "quality": quality_for_db,
         "pcm_codec": pcm_codec,
         "workers": max_workers,
         "hash": bool(hash_streaminfo),
@@ -601,12 +633,18 @@ def cmd_convert_dir(
             dp = out_root / pi.output_rel
             t0 = time.time()
             try:
-                copy_tags_flac_to_mp4(pi.src_path, dp)
+                if codec == "opus":
+                    copy_tags_flac_to_opus(pi.src_path, dp)
+                else:
+                    copy_tags_flac_to_mp4(pi.src_path, dp)
                 disc = []
                 status = "ok"
                 if verify_tags:
                     try:
-                        disc = verify_tags_flac_vs_mp4(pi.src_path, dp)
+                        if codec == "opus":
+                            disc = verify_tags_flac_vs_opus(pi.src_path, dp)
+                        else:
+                            disc = verify_tags_flac_vs_mp4(pi.src_path, dp)
                     except Exception as e:
                         disc = [f"verify-exception: {e}"]
                     status = "ok" if not disc else ("failed" if verify_strict else "warn")
@@ -725,9 +763,11 @@ def cmd_convert_dir(
         return _encode_one_selected_timed(
             pi.src_path,
             dp,
+            codec=codec,
             encoder=selected_encoder,
             tvbr=tvbr,
             vbr=vbr,
+            opus_vbr_kbps=opus_vbr_kbps,
             pcm_codec=pcm_codec,
             verify_tags=verify_tags,
             verify_strict=verify_strict,
@@ -759,7 +799,7 @@ def cmd_convert_dir(
                     output_rel=str(pi.output_rel),
                     encoder=pi.encoder,
                     vbr_quality=pi.vbr_quality,
-                    container="m4a",
+                    container=codec,
                 )
                 since_commit += 1
             except Exception:
@@ -852,8 +892,9 @@ def cmd_convert_dir(
     summary: dict[str, Any] = {
         "source": str(src_root),
         "dest": str(out_root),
+        "codec": codec,
         "encoder": selected_encoder,
-        "quality": tvbr if selected_encoder == "qaac" else vbr,
+        "quality": quality_for_db,
         "workers": max_workers,
         "hash": bool(hash_streaminfo),
         "force": bool(force),
@@ -977,6 +1018,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Parallel workers (default from settings: CPU cores if unset)",
     )
     p_dir.add_argument(
+        "--codec",
+        choices=["aac", "opus"],
+        default=None,
+        help="Output codec (default from settings: aac)",
+    )
+    p_dir.add_argument(
         "--tvbr",
         type=int,
         default=None,
@@ -987,6 +1034,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="libfdk_aac/fdkaac VBR quality/mode 1..5 (default from settings)",
+    )
+    p_dir.add_argument(
+        "--opus-vbr-kbps",
+        type=int,
+        default=None,
+        help="Opus VBR bitrate in kbps (default from settings)",
     )
     p_dir.add_argument(
         "--pcm-codec",
@@ -1085,8 +1138,10 @@ def main(argv: list[str] | None = None) -> int:
             log_json_path=cfg.log_json,
         )
     if args.cmd == "convert-dir":
+        codec_eff = args.codec if args.codec is not None else cfg.codec
         tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
         vbr_eff = args.vbr if args.vbr is not None else cfg.vbr
+        opus_vbr_kbps_eff = args.opus_vbr_kbps if args.opus_vbr_kbps is not None else cfg.opus_vbr_kbps
         workers_eff = args.workers if args.workers is not None else (cfg.workers or (os.cpu_count() or 1))
         hash_eff = cfg.hash_streaminfo if args.hash_streaminfo is None else args.hash_streaminfo
         commit_eff = args.commit_batch_size if args.commit_batch_size is not None else cfg.commit_batch_size
@@ -1107,8 +1162,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_convert_dir(
             args.in_dir,
             args.out_dir,
+            codec=codec_eff,
             tvbr=tvbr_eff,
             vbr=vbr_eff,
+            opus_vbr_kbps=opus_vbr_kbps_eff,
             workers=workers_eff,
             hash_streaminfo=hash_eff,
             verbose=args.verbose,

@@ -1,0 +1,38 @@
+{
+  "source": "/app/test_dir",
+  "dest": "/app/output_dir",
+  "codec": "opus",
+  "encoder": "libopus",
+  "quality": 160,
+  "workers": 4,
+  "hash": false,
+  "force": false,
+  "mode": "incremental",
+  "counts": {
+    "planned": 1,
+    "to_convert": 1,
+    "unchanged": 0,
+    "converted": 0,
+    "failed": 1
+  },
+  "pcm_codec": "pcm_s24le",
+  "verification": {
+    "enabled": false,
+    "strict": false,
+    "checked": 0,
+    "ok": 0,
+    "warn": 0,
+    "failed": 0
+  },
+  "tag_sync": null,
+  "timing_s": {
+    "total": 0.231,
+    "preflight": 0.149,
+    "scan": 0.0,
+    "db": 0.001,
+    "plan": 0.0,
+    "encode": 0.076
+  },
+  "output_bytes": 0,
+  "timestamp": 1756312848
+}
