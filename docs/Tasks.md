@@ -16,7 +16,7 @@ The project pivots to a stateless design. We remove the local SQLite DB and use 
 - Accept: New outputs contain PAC_*; verify step can read them.
 - Refs: `src/pac/metadata.py`.
 
-[ ] # B. Destination index (scan + PAC_* readers)
+[x] # B. Destination index (scan + PAC_* readers)
 - Why: Plan by comparing source vs destination without a DB.
 - Scope: New `dest_index.py`; build indices `by_rel` and `by_md5` from `.m4a/.opus` under dest root.
 - Accept: Scan lists entries and fingerprints; handles duplicates deterministically.
