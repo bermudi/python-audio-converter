@@ -36,6 +36,8 @@ from pac.metadata import (  # noqa: E402
     verify_tags_flac_vs_mp4,
     copy_tags_flac_to_opus,
     verify_tags_flac_vs_opus,
+    write_pac_tags_mp4,
+    write_pac_tags_opus,
 )
 from pac import db as pac_db  # noqa: E402
 from pac.scanner import scan_flac_files  # noqa: E402
@@ -146,6 +148,21 @@ def cmd_convert(
     except Exception as e:  # pragma: no cover
         logger.warning(f"Metadata copy failed: {e}")
 
+    # Embed PAC_* tags
+    try:
+        enc = "libfdk_aac" if st.has_libfdk_aac else ("qaac" if probe_qaac().available else ("fdkaac" if probe_fdkaac().available else "aac"))
+        qual = str(tvbr) if enc == "qaac" else "5"
+        write_pac_tags_mp4(
+            dest_p,
+            src_md5="",  # unknown here unless we rescan; planner can rely on later flows
+            encoder=enc,
+            quality=qual,
+            version="0.2",
+            source_rel=src_p.name,
+        )
+    except Exception as e:
+        logger.bind(action="pac_tags", file=str(src_p.name), status="warn", reason=str(e)).warning("PAC_* embed failed")
+
     # Optional verification
     if verify_tags:
         try:
@@ -204,6 +221,21 @@ def _encode_one(
             return 1, "failed"
         # If not strict, this is a warning. We can't reasonably verify, so we are done with this file.
         return 0, "warn"  # Return success code, but with a warning status.
+
+    # Embed PAC_* tags
+    try:
+        enc = "libfdk_aac" if probe_ffmpeg().has_libfdk_aac else ("qaac" if probe_qaac().available else ("fdkaac" if probe_fdkaac().available else "aac"))
+        qual = "5" if enc in {"libfdk_aac", "fdkaac"} else str(tvbr)
+        write_pac_tags_mp4(
+            dest_p,
+            src_md5="",
+            encoder=enc,
+            quality=qual,
+            version="0.2",
+            source_rel=src_p.name,
+        )
+    except Exception as e:
+        logger.bind(action="pac_tags", file=str(src_p.name), status="warn", reason=str(e)).warning("PAC_* embed failed")
 
     ver_status = "skipped"
     if verify_tags:
@@ -270,6 +302,29 @@ def _encode_one_selected(
         if verify_strict:
             return 1, "failed"
         return 0, "warn"
+
+    # Embed PAC_* tags
+    try:
+        if codec == "opus":
+            write_pac_tags_opus(
+                dest_p,
+                src_md5="",
+                encoder="libopus",
+                quality=str(opus_vbr_kbps),
+                version="0.2",
+                source_rel=src_p.name,
+            )
+        else:
+            write_pac_tags_mp4(
+                dest_p,
+                src_md5="",
+                encoder=encoder,
+                quality=str(tvbr if encoder == "qaac" else vbr),
+                version="0.2",
+                source_rel=src_p.name,
+            )
+    except Exception as e:
+        logger.bind(action="pac_tags", file=str(src_p.name), status="warn", reason=str(e)).warning("PAC_* embed failed")
 
     ver_status = "skipped"
     if verify_tags:
@@ -787,6 +842,28 @@ def cmd_convert_dir(
                     ver_warn += 1
                 elif ver_status == "failed":
                     ver_failed += 1
+            # Embed PAC_* tags into outputs to support stateless planning
+            try:
+                if codec == "opus":
+                    write_pac_tags_opus(
+                        dest_path,
+                        src_md5=str(getattr(pi, "flac_md5", "") or ""),
+                        encoder=str(getattr(pi, "encoder", "")) or "libopus",
+                        quality=str(getattr(pi, "vbr_quality", "") or opus_vbr_kbps),
+                        version="0.2",
+                        source_rel=str(getattr(pi, "rel_path", "")),
+                    )
+                else:
+                    write_pac_tags_mp4(
+                        dest_path,
+                        src_md5=str(getattr(pi, "flac_md5", "") or ""),
+                        encoder=str(getattr(pi, "encoder", "")) or ("qaac" if "qaac" in str(getattr(pi, "encoder", "")) else "libfdk_aac"),
+                        quality=str(getattr(pi, "vbr_quality", "")),
+                        version="0.2",
+                        source_rel=str(getattr(pi, "rel_path", "")),
+                    )
+            except Exception as e:
+                logger.bind(action="pac_tags", file=str(pi.rel_path), status="warn", reason=str(e)).warning("PAC_* embed failed")
             # Upsert DB for successful encode
             try:
                 pac_db.upsert_file(

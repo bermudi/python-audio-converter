@@ -1,12 +1,15 @@
-"""Metadata helpers using mutagen for FLAC -> MP4 tag copying.
+"""Metadata helpers using mutagen for FLAC -> MP4/Opus tag copying.
 
 Copies common text tags, track/disc numbers, cover art, and where possible,
 MusicBrainz identifiers into MP4 freeform atoms.
+
+Also supports writing/reading PAC_* stateless tags so outputs are
+self-describing for planning without any local DB.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 import base64
 
 
@@ -86,7 +89,7 @@ def _first_front_cover(flac_obj) -> Optional[bytes]:
     return None
 
 
-def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path) -> None:
+def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path, pac: Optional[Dict[str, str]] = None) -> None:
     """Copy common tags and cover art from FLAC to MP4/M4A.
 
     This is best-effort and idempotent; missing tags are skipped.
@@ -168,10 +171,14 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path) -> None:
                 # Non-fatal; continue copying other tags
                 pass
 
+    # PAC_* embedding (freeform atoms) when provided
+    if pac:
+        _mp4_set_pac_tags(m, pac)
+
     m.save()
 
 
-def copy_tags_flac_to_opus(src_flac: Path, dst_opus: Path) -> None:
+def copy_tags_flac_to_opus(src_flac: Path, dst_opus: Path, pac: Optional[Dict[str, str]] = None) -> None:
     """Copy all Vorbis comments and cover art from FLAC to Opus."""
     from mutagen.flac import FLAC, Picture
     from mutagen.oggopus import OggOpus
@@ -196,6 +203,10 @@ def copy_tags_flac_to_opus(src_flac: Path, dst_opus: Path) -> None:
 
         # OggOpus expects METADATA_BLOCK_PICTURE to be a base64 string
         o.tags["METADATA_BLOCK_PICTURE"] = base64.b64encode(pic.write()).decode("ascii")
+
+    # PAC_* embedding as Vorbis comments when provided
+    if pac:
+        _opus_set_pac_tags(o, pac)
 
     o.save()
 
@@ -334,3 +345,138 @@ def verify_tags_flac_vs_mp4(src_flac: Path, dst_mp4: Path) -> list[str]:
         disc.append(f"disctotal: expected='{dsk_tot}' got='{g_dtot or 0}'")
 
     return disc
+
+
+# ---------------------------------------------------------------------------
+# PAC_* helpers (stateless tags)
+# ---------------------------------------------------------------------------
+
+PAC_KEYS = (
+    "PAC_SRC_MD5",
+    "PAC_ENCODER",
+    "PAC_QUALITY",
+    "PAC_VERSION",
+    "PAC_SOURCE_REL",
+)
+
+
+def _mp4_set_pac_tags(m, pac: Dict[str, str]) -> None:
+    """Set PAC_* tags on a mutagen MP4 object using freeform atoms."""
+    from mutagen.mp4 import MP4FreeForm
+
+    mapping = {
+        "PAC_SRC_MD5": "----:org.pac:src_md5",
+        "PAC_ENCODER": "----:org.pac:encoder",
+        "PAC_QUALITY": "----:org.pac:quality",
+        "PAC_VERSION": "----:org.pac:version",
+        "PAC_SOURCE_REL": "----:org.pac:source_rel",
+    }
+    for k, atom in mapping.items():
+        v = str(pac.get(k, ""))
+        if not v:
+            continue
+        try:
+            m[atom] = [MP4FreeForm(v.encode("utf-8"))]
+        except Exception:
+            # Non-fatal; continue setting other tags
+            pass
+
+
+def write_pac_tags_mp4(dst_mp4: Path, *, src_md5: str, encoder: str, quality: str | int, version: str, source_rel: str) -> None:
+    """Write PAC_* freeform atoms to an MP4/M4A file."""
+    from mutagen.mp4 import MP4
+
+    m = MP4(str(dst_mp4))
+    _mp4_set_pac_tags(
+        m,
+        {
+            "PAC_SRC_MD5": src_md5,
+            "PAC_ENCODER": encoder,
+            "PAC_QUALITY": str(quality),
+            "PAC_VERSION": version,
+            "PAC_SOURCE_REL": source_rel,
+        },
+    )
+    m.save()
+
+
+def read_pac_tags_mp4(dst_mp4: Path) -> Dict[str, str]:
+    """Read PAC_* tags from an MP4/M4A if present; returns empty strings when missing."""
+    from mutagen.mp4 import MP4
+
+    m = MP4(str(dst_mp4))
+    out: Dict[str, str] = {k: "" for k in PAC_KEYS}
+    mapping = {
+        "PAC_SRC_MD5": "----:org.pac:src_md5",
+        "PAC_ENCODER": "----:org.pac:encoder",
+        "PAC_QUALITY": "----:org.pac:quality",
+        "PAC_VERSION": "----:org.pac:version",
+        "PAC_SOURCE_REL": "----:org.pac:source_rel",
+    }
+    try:
+        tags = m.tags or {}
+        for k, atom in mapping.items():
+            val_list = tags.get(atom)
+            if val_list and isinstance(val_list, list) and val_list:
+                v = val_list[0]
+                try:
+                    out[k] = v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else str(v)
+                except Exception:
+                    out[k] = str(v)
+    except Exception:
+        pass
+    return out
+
+
+def _opus_set_pac_tags(o, pac: Dict[str, str]) -> None:
+    """Set PAC_* tags on a mutagen OggOpus object as Vorbis comments."""
+    tags = o.tags
+    for k in PAC_KEYS:
+        v = str(pac.get(k, ""))
+        if v:
+            tags[k] = v
+
+
+def write_pac_tags_opus(dst_opus: Path, *, src_md5: str, encoder: str, quality: str | int, version: str, source_rel: str) -> None:
+    """Write PAC_* Vorbis comments to an Opus file."""
+    from mutagen.oggopus import OggOpus
+
+    o = OggOpus(str(dst_opus))
+    _opus_set_pac_tags(
+        o,
+        {
+            "PAC_SRC_MD5": src_md5,
+            "PAC_ENCODER": encoder,
+            "PAC_QUALITY": str(quality),
+            "PAC_VERSION": version,
+            "PAC_SOURCE_REL": source_rel,
+        },
+    )
+    o.save()
+
+
+def read_pac_tags_opus(dst_opus: Path) -> Dict[str, str]:
+    """Read PAC_* tags from an Opus file; returns empty strings when missing."""
+    from mutagen.oggopus import OggOpus
+
+    o = OggOpus(str(dst_opus))
+    out: Dict[str, str] = {k: "" for k in PAC_KEYS}
+    try:
+        tags = o.tags or {}
+        for k in PAC_KEYS:
+            val = (tags.get(k) or [None])[0]
+            if isinstance(val, str):
+                out[k] = val
+    except Exception:
+        pass
+    return out
+
+
+def read_pac_tags(path: Path) -> Dict[str, str]:
+    """Container-dispatching reader for PAC_* tags based on file suffix."""
+    suf = path.suffix.lower()
+    if suf in {".m4a", ".mp4", ".mp4a"}:
+        return read_pac_tags_mp4(path)
+    if suf in {".opus"}:
+        return read_pac_tags_opus(path)
+    return {k: "" for k in PAC_KEYS}
