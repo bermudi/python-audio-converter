@@ -1,7 +1,7 @@
 # Software Requirements Specification (SRS)
 
 Project: Python Audio Converter (FLAC → AAC Mirror)
-Version: 0.1 (Draft)
+Version: 0.2 (DB-less, stateless addendum)
 Date: 2025-08-19
 Owner: daniel
 
@@ -20,11 +20,11 @@ Owner: daniel
 
 ## 2. System Overview
 
-- High-level flow: Source scan → Change detection (vs local state DB) → Work queue → Parallel transcodes (AAC encoder backend with fallback: ffmpeg+libfdk_aac → qaac(pipe) → fdkaac(pipe)) → Metadata/cover propagation → Output to target path → State DB update → Report.
+- High-level flow (v0.2): Source scan → Destination scan (PAC_* read) → Stateless plan → Parallel transcodes (AAC/Opus backends) → Tag copy + embed PAC_* → Atomic write/rename → Optional retag/rename/prune → Report.
 - Backend is selected once per run (stable selection) to keep planning and DB decisions consistent.
 - Components:
   - Scanner: Walks source directory, computes identifiers for change detection (see §5.2).
-  - State DB: Local SQLite tracking previously converted items and parameters.
+  - Destination Index (v0.2): Filesystem scan of outputs (.m4a/.opus) that reads embedded PAC_* tags to derive state without a local DB.
   - Scheduler: Batches and runs conversion jobs in parallel with backpressure.
   - Encoder Backend: Preferred FFmpeg+libfdk_aac. Fallbacks: FFmpeg decode piped to `qaac` (true VBR) then to `fdkaac`.
   - Metadata Copier: Ensures tags and cover art are preserved (1:1 when feasible).
@@ -43,9 +43,15 @@ FR-4: The system shall perform no audio processing beyond encode (no normalizati
 
 FR-5: The system shall preserve metadata tags (artist, album, title, track number, disc, date/year, genre, album artist, compilation flag, MusicBrainz IDs when present) and cover art when possible. Failures to copy any field or art shall be logged per file.
 
-FR-6: The system shall maintain a local state database that tracks converted files independent of the destination’s presence. The state shall be sufficient to avoid re‑converting unchanged files.
+FR-A (stateless): The system shall not require a local database. All change detection derives from current source tree, destination tree, and metadata embedded in outputs.
 
-FR-7: The system shall detect file changes and re-encode only when needed. Change detection shall consider at least: source path, file size, mtime, and a content hash (configurable) and encoder settings (e.g., VBR mode). If any of these change, the file is considered stale.
+FR-B (fingerprint): The system shall embed in each output: PAC_SRC_MD5 (FLAC STREAMINFO MD5), PAC_ENCODER, PAC_QUALITY, PAC_VERSION, PAC_SOURCE_REL.
+
+FR-C (move/rename): The system shall detect moved/renamed sources by matching PAC_SRC_MD5 in destination and may rename outputs instead of re-encoding.
+
+FR-D (adoption): When outputs lack PAC_* (older runs), the system shall optionally adopt them as up-to-date if present at expected path and retag to add PAC_*; a `--no-adopt` policy forces re-encode instead.
+
+FR-E (prune): The system shall optionally identify/prune orphan outputs whose PAC_SRC_MD5 has no source counterpart.
 
 FR-8: The system shall support parallel conversion with a configurable number of workers. Default shall be a sensible fraction of available CPU cores.
 
@@ -74,17 +80,14 @@ FR-16: The system shall emit structured JSON line events (optional) and shall al
 
 FR-17: The system shall allow configuring the PCM decode codec used when piping FFmpeg to external encoders via a setting and CLI flag `--pcm-codec` with choices `pcm_s24le`, `pcm_f32le`, or `pcm_s16le`. The default shall be `pcm_s24le`.
 
-FR-18: Reconcile destination mode: Given a source directory and destination directory, the system shall detect already-converted outputs that exist at the destination (by applying the output path template to source relpaths) and update the local state DB to reflect them as converted without re-encoding. Only missing or stale source files shall be scheduled for encoding.
-
-FR-19: Metadata sync mode: Given a source directory and destination directory, the system shall, for tracks whose outputs already exist, update MP4 tags and cover art in place to match the source FLAC without re-encoding, and convert only missing or stale items. Tag sync outcomes (ok/warn/error) shall be logged and reflected in the run summary, and verification shall honor `--verify-tags` and `--verify-strict` policies.
-
-FR-20: Force full rebuild mode: The system shall support a mode that converts all source tracks regardless of DB state and existing outputs, overwriting destination files as needed, and updating the state DB after completion. The CLI/GUI shall include a guard (e.g., confirmation prompt) to prevent accidental mass re-encodes.
+FR-18..FR-20 (legacy modes): Replaced by simpler flags and planner actions in v0.2:
+- `--retag-existing` (default on), `--rename` (default on), `--prune`, `--no-adopt`, `--force-reencode`.
 
 ## 4. Non‑Functional Requirements
 
 NFR-1 Performance: With N workers on an 8‑core CPU and SSD storage, the system should achieve near‑linear scaling up to saturation of CPU or I/O for typical stereo FLACs. Target throughput and CPU utilization thresholds to be finalized in acceptance (§8).
 
-NFR-2 Reliability: Re‑runnable and idempotent. If interrupted, a subsequent run resumes from the last consistent state using the DB and output presence checks (when destination is mounted).
+NFR-2 Reliability: Re‑runnable and idempotent without external state. If interrupted, a subsequent run re-plans from filesystem and embedded PAC_* tags.
 
 NFR-3 Usability: GUI shall expose safe defaults and advanced settings behind an “Advanced” pane. Progress shall be clear and actionable.
 
@@ -100,15 +103,7 @@ NFR-7 Scalability of scheduling: The scheduler shall bound in‑flight work item
 
 5.1 Licensing: libfdk_aac availability varies and may be non‑free in some contexts. The app shall not bundle any encoder. It shall rely on system tools: FFmpeg (required), and optionally `qaac`/`fdkaac`. Documentation shall provide install guidance for each.
 
-5.2 State DB: SQLite located at a standard path (e.g., `~/.local/share/python-audio-converter/state.sqlite`). Schema (initial):
-- files(id, src_path TEXT PK, rel_path TEXT, size BIGINT, mtime BIGINT, sha256 TEXT NULL, duration_ms INT NULL,
-        encoder TEXT, vbr_quality INT, container TEXT, last_converted_at DATETIME NULL, output_rel TEXT)
-- runs(id PK, started_at, finished_at, ffmpeg_version, settings_json, stats_json)
-- file_runs(id PK, run_id FK, src_path, status ENUM('converted','skipped','failed'), reason TEXT, elapsed_ms INT)
-Indexes: files(rel_path), files(output_rel), files(last_converted_at), file_runs(run_id), file_runs(src_path), file_runs(status).
-file_runs.status is constrained to ENUM('converted','skipped','failed') via CHECK.
-Migration v3 adds indexes and integrity constraints if missing.
-Assumptions: hashing can be enabled/disabled (performance tradeoff). When disabled, size+mtime are used.
+5.2 Local state: None (v0.2). The filesystem and PAC_* tags are the single source of truth. When STREAMINFO MD5 is unavailable, fallback heuristics may use size+mtime or full SHA256 as configured.
 
 5.3 Environment: Python 3.12. System FFmpeg (libfdk_aac preferred). Optional `qaac` and `fdkaac` as fallbacks. GUI via Qt (PySide6) on Linux.
 

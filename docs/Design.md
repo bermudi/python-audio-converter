@@ -10,7 +10,7 @@ Related: docs/SRS.md
 - Encode to AAC (M4A) targeting ~256 kbps VBR. Preferred backend: FFmpeg with libfdk_aac. Fallbacks: FFmpeg decode piped to `qaac` (true VBR), then to `fdkaac`. No additional audio processing.
 - Preserve metadata and cover art as faithfully as possible.
 - Provide a Linux desktop GUI with parallel conversion and resumable, incremental runs.
-- Maintain a local SQLite state database to avoid re-encoding unchanged files even when the destination is absent.
+- Stateless by design: avoid any local DB by embedding PAC_* fingerprints/settings in outputs and deriving state from filesystem.
 
 Non-goals (for v1):
 - Cross-platform packaging beyond Linux.
@@ -21,7 +21,7 @@ Non-goals (for v1):
 
 Data flow:
 
-1) Scan Source → 2) Plan (Change Detection vs DB) → 3) Job Queue → 4) Parallel Encoders → 5) Metadata/Art ensure → 6) Output Write → 7) State DB Update → 8) Report
+1) Scan Source → 2) Scan Destination (PAC_* read) → 3) Stateless Plan → 4) Parallel Encoders → 5) Tag copy + embed PAC_* → 6) Atomic Output Write/Rename → 7) Optional rename/retag/prune → 8) Report
 
 Components:
 - Scanner
@@ -29,7 +29,7 @@ Components:
 - Scheduler (worker pool)
 - Encoder Worker (FFmpeg)
 - Metadata Copier/Verifier
-- State DB (SQLite)
+- Destination Index (reads PAC_* from outputs)
 - GUI (PySide6)
 - Config + Logging
 
@@ -53,52 +53,24 @@ Components:
   - duration (optional; via ffprobe or mutagen)
 - Output: list of `SourceFile` records.
 
-### 3.3 State DB (SQLite)
-- Location: `~/.local/share/python-audio-converter/state.sqlite` (configurable).
-- Initial schema (aligned with SRS §5.2):
-  - files(
-    src_path TEXT PRIMARY KEY,
-    rel_path TEXT NOT NULL,
-    size BIGINT NOT NULL,
-    mtime BIGINT NOT NULL,
-    flac_md5 TEXT NULL,
-    sha256 TEXT NULL,
-    duration_ms INT NULL,
-    encoder TEXT NOT NULL,
-    vbr_quality INT NOT NULL,
-    container TEXT NOT NULL,
-    last_converted_at DATETIME NULL,
-    output_rel TEXT NOT NULL
-  )
-  - runs(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at DATETIME NOT NULL,
-    finished_at DATETIME NULL,
-    ffmpeg_version TEXT NOT NULL,
-    settings_json TEXT NOT NULL,
-    stats_json TEXT NULL
-  )
-  - file_runs(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INT NOT NULL REFERENCES runs(id),
-    src_path TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('converted','skipped','failed')),
-    reason TEXT NULL,
-    elapsed_ms INT NULL
-  )
-- Migration strategy: minimal, versioned via `PRAGMA user_version`; simple forward migrations encoded in code.
- - Indexes: files(rel_path), files(output_rel), files(last_converted_at), file_runs(run_id), file_runs(src_path), file_runs(status).
- - Migration v3 adds the above indexes and sets CHECK constraint on file_runs.status where missing.
+### 3.3 Destination Index (stateless)
+- Purpose: Derive state from the destination filesystem by reading embedded PAC_* tags in `.m4a`/`.opus` files.
+- Scan builds:
+  - `by_rel: {relpath -> DestEntry}`
+  - `by_md5: {PAC_SRC_MD5 -> list[DestEntry]}` (handle duplicates deterministically)
+- Fields captured: `size`, `mtime`, container, and PAC_*: `PAC_SRC_MD5`, `PAC_ENCODER`, `PAC_QUALITY`, `PAC_VERSION`, `PAC_SOURCE_REL`.
+- Adoption policy: outputs missing PAC_* may be treated as up-to-date at expected relpath and retagged to add PAC_* (configurable `--no-adopt` to force re-encode).
 
-### 3.4 Planner (Change Detection)
-- For each scanned file, lookup prior record by `src_path`.
-- A file is “stale” if any of:
-  - Not in DB.
-  - `size` or `mtime` differs.
-  - FLAC MD5 differs (if available and stored).
-  - Encoder settings differ (encoder name, VBR quality, container).
-- Plan entries include: input path, output relative path, chosen `-vbr` level, and metadata copy plan.
-- Dry-run produces a human-readable and JSON plan.
+### 3.4 Planner (Stateless decisions)
+- Inputs: Source scan (with FLAC STREAMINFO MD5), Destination Index, current encoder settings, path sanitizer.
+- Rules:
+  - Skip: `PAC_SRC_MD5` matches source MD5 and encoder/quality match.
+  - Retag: same as Skip but tags differ or PAC_* missing (adopt policy).
+  - Rename: expected output missing but some dest entry has same `PAC_SRC_MD5` → plan move to expected relpath.
+  - Convert: expected output missing and no matching `PAC_SRC_MD5`.
+  - Force: `--force-reencode` overrides and converts all.
+  - Prune: dest entries whose `PAC_SRC_MD5` has no source counterpart (optional `--prune`).
+- Output: `PlanItem` with action ∈ {skip, convert, rename, retag, prune}; dry-run summarizes counts.
 
 ### 3.5 Encoder Worker
 - Subprocess pipelines, selected in this order:
@@ -146,7 +118,10 @@ Components:
   - Reporting: when enabled, include verification totals in the run summary: `checked`, `ok`, `warn`, `failed`.
   - Policy: When strict verification is enabled, any tag‑copy exception or verification discrepancy marks the file as failed.
   - Logging: emit a `verify` event with `status=ok|warn|failed` and an array of discrepancies.
-  - Strict mode (`--verify-strict`): if discrepancies exist, mark file as failed.
+ - Strict mode (`--verify-strict`): if discrepancies exist, mark file as failed.
+ - PAC_* embedding: After tag copy, write PAC_* fields into outputs:
+   - MP4 freeform atoms: `"----:org.pac:src_md5"`, `encoder`, `quality`, `version`, `source_rel`.
+   - Opus Vorbis comments: `PAC_SRC_MD5`, `PAC_ENCODER`, `PAC_QUALITY`, `PAC_VERSION`, `PAC_SOURCE_REL`.
 
 ### 3.7 Scheduler and Parallelism
  - Use a bounded worker pool managing subprocess jobs (only O(workers) tasks in flight), providing backpressure on very large catalogs.
@@ -161,7 +136,7 @@ Components:
   - Setup: choose Source and Destination; test FFmpeg.
   - Scan Results: counts, preview list, filters (new/changed/failed previously).
   - Convert: overall progress + table with per-file status, bitrate, elapsed; pause/resume/cancel; retry failed.
-  - Settings: VBR quality, workers, output template, hashing toggle, DB location, logging level.
+  - Settings: VBR quality, workers, output template, hashing toggle, logging level.
   - Logs/Report: live log pane, export run report (JSON and text).
 - Architecture:
   - MVC-ish: a `JobModel` (QAbstractTableModel) for file rows; a `Controller` to orchestrate scanner/planner/scheduler; `Views` bound to model.
@@ -173,7 +148,7 @@ Components:
   - log_level, log_json
   - tvbr (qaac), vbr (libfdk/fdkaac), workers
   - pcm_codec (pcm_s24le|pcm_f32le|pcm_s16le)
-  - hash_streaminfo, force, commit_batch_size
+  - hash_streaminfo, force
   - verify_tags, verify_strict
  - Future additions: faststart toggle (currently always enabled), scan_duration, progress default, log rotation/retention
  - Note: Settings are merged from defaults + TOML + env (PAC_*) + CLI overrides; `--write-config` emits the effective TOML.
@@ -186,37 +161,16 @@ Components:
 
 ### 3.11 Operation Modes
 
-- Incremental (default): Current behavior based on Planner decisions (§3.4/§6). Convert only new/changed (stale) items and update DB.
-
-- Reconcile destination (no re-encode for existing outputs):
-  - Input: source root and destination root.
-  - Action: For each scanned source file, compute expected output path (template §7). If the output file exists at destination but DB lacks an entry or is out-of-date, upsert a `files` row to reflect it as converted without running the encoder.
-  - DB policy: Set `output_rel` deterministically; set `last_converted_at` to the destination file mtime; record current encoder settings in `files` for consistency going forward.
-  - Planning: Schedule encodes only for sources with missing outputs or stale sources per change detection (§6). Log a `reconcile` event per file indicating `found|inserted|skipped`.
-  - Verification (optional): When `--verify-tags` is enabled and destination is mounted, optionally open MP4 to confirm container and minimal tag presence; discrepancies are warnings in reconcile mode.
-
-- Metadata sync (tags/art only) + incremental convert:
-  - Input: source root and destination root.
-  - Action: For sources whose expected outputs exist, open both FLAC and MP4 and synchronize tags and cover art in place (no audio re-encode). Idempotent:
-    - Normalize tags (Unicode NFC, whitespace trim) before comparison (§3.6 rules).
-    - Write only when differences exist; emit `tags` events with status `ok|updated|warn|error`.
-  - Planning: Missing or stale sources are still scheduled for full encode. Existing outputs get a lightweight "tag-sync" job.
-  - Policy: With `--verify-strict`, any tag copy/verify discrepancy marks the file as failed for the run.
-
-- Force full rebuild:
-  - Action: Ignore DB staleness decisions and existing destination files; schedule all sources for re-encode and overwrite outputs atomically (§3.5 output workflow).
-  - Safety: Require explicit CLI flag and GUI confirmation.
-  - DB: Update/replace `files` rows after successful writes; `file_runs` captures reasons and elapsed as usual.
-
-CLI/GUI surfacing:
-- CLI proposal: `--mode {incremental|reconcile|sync-tags|force-rebuild}` (default `incremental`). Mutually exclusive with legacy `--force` if present.
-- GUI: Mode dropdown on the Convert view with a brief description and a confirmation dialog for Force Rebuild.
+- Default incremental: Stateless planner (§3.4) decides actions; no DB updates.
+- Simpler flags replace modes:
+  - `--retag-existing` (default on), `--rename` (default on), `--prune` (guarded), `--no-adopt`, `--force-reencode` (guarded).
+- GUI: Show plan categories (convert/skip/rename/retag/orphan), progress, pause/cancel; confirm before prune/force.
 
 ## 4. Concurrency & Performance
 - Each encode uses `-threads 1` to make throughput mostly proportional to number of workers; avoid CPU oversubscription.
 - I/O considerations: stagger job start, prefer sequential writes by limiting concurrent outputs or by randomizing start order to avoid hot directories.
 - Temp files: write to same filesystem as destination to keep atomic rename cheap.
-- Large libraries: use incremental commits to DB; wrap batches in transactions for performance.
+- Large libraries: destination/source scans parallelized; planner/scheduler keep O(workers) in-flight tasks.
 - Task submission is bounded (~2×workers) to maintain a stable memory/FD footprint on catalogs with ≥100k files.
 
 ## 5. FFmpeg Invocation Details
@@ -249,11 +203,9 @@ ffmpeg -nostdin -hide_banner -loglevel error
   - For piping, we use robust subprocess management without temp WAV files; stderr is captured for diagnostics.
 
 ## 6. Change Detection Algorithm
-- Primary key: `src_path` (absolute) and `rel_path` for output mapping.
-- Compare current scan to DB entry:
-  - If FLAC MD5 available: use it; otherwise rely on `size` + `mtime`; optional `sha256` when hashing enabled.
-  - If encoder settings changed (e.g., VBR quality), mark as stale.
-- When destination is mounted, optionally verify the presence and container/bitrate of existing outputs; however, correctness relies solely on local DB.
+- Use `PAC_SRC_MD5` embedded in outputs to match against source MD5. If absent, follow adopt policy or re-encode with `--no-adopt`.
+- If encoder settings change (encoder or quality), re-encode only mismatched outputs.
+- Detect moves/renames by locating any destination entry with matching `PAC_SRC_MD5` and planning a rename.
 
 ## 7. File Naming and Templates
 - Default: preserve relative directory and base name; replace `.flac` with `.m4a`.
@@ -267,11 +219,11 @@ ffmpeg -nostdin -hide_banner -loglevel error
  - Filesystem errors report errno and perform best‑effort cleanup of temporary outputs; a single retry is allowed for transient errors (e.g., EBUSY).
 
 ## 9. Testing Strategy
-- Unit tests: path mapping, DB ops, change detection, config, FFmpeg preflight parsing.
+- Unit tests: path mapping, destination index PAC_* readers, stateless planner decisions, config, FFmpeg preflight parsing.
 - Integration tests:
   - Small FLAC fixtures with diverse tags and embedded art.
   - Validate output: container, average bitrate range for q=5, tag parity, cover presence.
-- Concurrency: simulate N workers, ensure DB consistency and UI responsiveness.
+- Concurrency: simulate N workers; ensure bounded in-flight tasks and UI responsiveness.
 
 ## 10. Security, Privacy, Licensing
 - No telemetry. All data local.
@@ -289,7 +241,6 @@ ffmpeg -nostdin -hide_banner -loglevel error
 ## 13. Implementation Plan (Mapping to Modules)
 - `src/pac/ffmpeg_check.py`: probe for ffmpeg + libfdk_aac, and presence/versions of `qaac` and `fdkaac`.
 - `src/pac/scanner.py`: filesystem walk, FLAC MD5/duration extraction.
-- `src/pac/db.py`: SQLite access, migrations, CRUD for files/runs.
 - `src/pac/planner.py`: change detection and plan generation; dry-run formatter.
 - `src/pac/encoder.py`: FFmpeg command builder, pipe-to-qaac/fdkaac execution, tmp→final move, stderr capture.
 - `src/pac/metadata.py`: tag mapping FLAC→MP4, cover art ensure/verify.
@@ -297,6 +248,7 @@ ffmpeg -nostdin -hide_banner -loglevel error
 - `app/gui/`: PySide6 main window, models, views, controllers.
 - `tests/`: unit and integration suites with fixtures.
  - `src/pac/paths.py`: destination sanitization and collision resolution (case‑insensitive aware).
+ - `src/pac/dest_index.py`: destination scan and PAC_* readers (new).
 
 ## 14. Tooling and Packaging
 - Python 3.12, managed via `uv` (no raw pip).

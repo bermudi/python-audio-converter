@@ -1,8 +1,69 @@
 # Tasks
 
-Generated: 2025-08-26 10:48:38 -06:00
+Generated: 2025-09-01 19:31:48 -06:00
 
 Priority is top-down. Each task has a brief scope and acceptance criteria.
+
+## Pivot: DB-less, stateless mirror (v0.2)
+
+The project pivots to a stateless design. We remove the local SQLite DB and use filesystem + embedded PAC_* tags in outputs as the single source of truth.
+
+[x] # A. Embed PAC_* fingerprint/settings in outputs (MP4/Opus)
+- Why: Make outputs self-describing and enable stateless change detection.
+- Scope:
+  - Write PAC_SRC_MD5, PAC_ENCODER, PAC_QUALITY, PAC_VERSION, PAC_SOURCE_REL on encode.
+  - Mutagen MP4 freeform atoms: `"----:org.pac:..."`; Opus via Vorbis comments.
+- Accept: New outputs contain PAC_*; verify step can read them.
+- Refs: `src/pac/metadata.py`.
+
+[ ] # B. Destination index (scan + PAC_* readers)
+- Why: Plan by comparing source vs destination without a DB.
+- Scope: New `dest_index.py`; build indices `by_rel` and `by_md5` from `.m4a/.opus` under dest root.
+- Accept: Scan lists entries and fingerprints; handles duplicates deterministically.
+- Refs: `src/pac/dest_index.py` (new).
+
+[ ] # C. Planner v2 (stateless actions)
+- Why: Decide {skip, convert, rename, retag, prune} from source/dest + PAC_*.
+- Scope: Replace DB-based planner; implement rules per Design v0.2.
+- Accept: Dry-run shows counts; executes correctly; JSON summary unchanged in spirit.
+- Refs: `src/pac/planner.py`.
+
+[ ] # D. CLI cleanup and new flags
+- Why: Simpler UX; remove DB knobs.
+- Scope: Drop `init-db`, `commit-batch-size`, `--mode {reconcile,sync-tags,force-rebuild}`.
+  - Add `--retag-existing` (default on), `--rename` (default on), `--prune`, `--no-adopt`, `--force-reencode`.
+- Accept: Help text reflects new flags; old options removed.
+- Refs: `main.py`.
+
+[ ] # E. GUI: plan categories and execution
+- Why: Expose new planner outcomes and progress.
+- Scope: Show counts by action; support pause/cancel; apply rename/retag/prune per flags.
+- Accept: Smooth progress; responsive UI; summary matches CLI.
+- Refs: `app/gui/main.py`.
+
+[ ] # F. Adopt policy (default) and retag
+- Why: Keep prior outputs; add PAC_* when missing.
+- Scope: If output exists at expected relpath but lacks PAC_*, treat as up-to-date and retag to add PAC_* unless `--no-adopt`.
+- Accept: Legacy outputs retained and annotated; strict mode re-encodes.
+- Refs: `src/pac/metadata.py`, `src/pac/planner.py`.
+
+[ ] # G. Orphan prune (optional)
+- Why: Clean destination of files with no source counterpart.
+- Scope: Plan orphans; delete only with `--prune` (confirm in GUI/CLI).
+- Accept: Dry-run shows orphans; deletes honored only when requested.
+- Refs: `src/pac/planner.py`, `main.py`.
+
+[ ] # H. Perf polish for scans
+- Why: Large libraries; fast re-scans.
+- Scope: Parallel tag reads; memory-bounded iteration; efficient I/O.
+- Accept: Scan scales to 100k+ files with stable memory.
+- Refs: `src/pac/dest_index.py`, `src/pac/scanner.py`.
+
+[ ] # I. Docs update (Quickstart/Design/SRS)
+- Why: Reflect DB-less pivot and flags.
+- Scope: Update Design.md, SRS.md, README.md; describe PAC_*; rename/prune behavior.
+- Accept: Docs match code.
+- Refs: `docs/`, `README.md`.
 
 [x] # 1. Harden encoder invocations: explicit stream mapping, faststart, decode intent
 - Why: Prevent accidental multi-stream issues; improve player compatibility; make decode predictable.
@@ -35,14 +96,9 @@ Priority is top-down. Each task has a brief scope and acceptance criteria.
 - Accept: JSON log lines contain tags events; strict mode fails files with copy or verify errors; warnings for benign mismatches.
 - Refs: main.py (_encode_one_selected), src/pac/metadata.py.
 
-[ ] # 5. Record last_converted_at and richer per-run stats
-- Why: Auditing; better plan explanations; SRS §5.2 completeness.
-- Scope:
-  - Update upsert_file() to set last_converted_at (UTC ISO). Add index on files(last_converted_at).
-  - Include verification counters and bytes_out in runs.stats_json.
-  - Optionally store encoder path/version in file_runs.reason JSON blob.
-- Accept: After run, files.last_converted_at populated; runs.stats_json contains verification and bytes_out totals.
-- Refs: src/pac/db.py, main.py (post-success paths). Migration v3 required.
+[x] # 5. Record last_converted_at and richer per-run stats (DEPRECATED – DB removed)
+- Replaced by stateless summaries; keep structured per-run JSON only.
+- Refs: remove `src/pac/db.py` usage.
 
 [ ] # 6. Consistent structured log schema + rotation
 - Why: Easier downstream parsing and GUI consumption; avoid unbounded log growth.
@@ -52,7 +108,7 @@ Priority is top-down. Each task has a brief scope and acceptance criteria.
 - Accept: All per-file events use the schema; JSON logs rotate at configured size/time; GUI respects same rotation policy when file sink used.
 - Refs: main.py (configure_logging, emit sites), app/gui/main.py.
 
-[ ] # 7. Duration in scan (optional)
+- [ ] # 7. Duration in scan (optional)
 - Why: Reporting and bitrate QA (SRS §7, Tasks 6).
 - Scope: Add --scan-duration to compute duration_ms via ffprobe or mutagen; store in DB and summary; expose in JSON logs for each file (optional).
 - Accept: duration_ms present when enabled; appears in summary JSON; negligible overhead when disabled.
@@ -74,13 +130,8 @@ Priority is top-down. Each task has a brief scope and acceptance criteria.
 - Accept: User can cancel/pause/resume; progress updates live; no UI freeze; startup logs visible in GUI.
 - Refs: app/gui/main.py, src/pac/scheduler.py, main.py.
 
-[ ] # 10. DB migration v3: indexes and integrity
-- Why: Scale; enforce consistency.
-- Scope:
-  - Add indexes: files(rel_path), files(output_rel), files(last_converted_at), file_runs(status), file_runs(src_path, run_id).
-  - Optional: UNIQUE on files.output_rel if policy requires 1:1 mapping; or enforce in planner with collision resolver.
-- Accept: Large DB lookups are fast; migration applies automatically; uniqueness policy documented.
-- Refs: src/pac/db.py.
+[x] # 10. DB migration v3: indexes and integrity (REMOVED)
+- DB eliminated in v0.2.
 
 [ ] # 11. Single source of truth for backend selection
 - Why: Avoid divergence between single-file and directory code paths.
@@ -129,30 +180,11 @@ What’s already done from your original list
 Deprioritized or rolled into others
 - CLI progress UI remains important (Task 8), but correctness/perf hardening (Tasks 1–3) should come first on large libraries.
 
-[ ] # 16. Mode: Reconcile destination (update DB; convert missing)
-- Why: SRS FR‑18. When destination already contains many converted files (e.g., prior runs or copies), avoid re‑encoding and align the local DB.
-- Scope:
-  - Add planner/runner support for `--mode reconcile` (or GUI dropdown). For each source, compute expected `output_rel` and check `dst_root/output_rel` exists.
-  - If exists and DB has no row or is out-of-date, upsert `files` with `output_rel`, `size`, `mtime`, and set `last_converted_at` from destination mtime. Record current encoder settings.
-  - Schedule encodes only for missing outputs or stale sources per §6 change detection. Emit structured `reconcile` events: status `found|inserted|skipped`.
-- Accept: On a library where 90% of outputs already exist, the run updates DB for those and only encodes the remaining 10%; summary shows counts for reconciled vs encoded.
-- Refs: `src/pac/planner.py`, `src/pac/db.py`, `main.py` (CLI), `app/gui/main.py`.
+[x] # 16. Mode: Reconcile destination (REMOVED)
+- Superseded by stateless planner with PAC_* adoption and rename detection.
 
-[ ] # 17. Mode: Metadata sync for existing outputs + convert missing
-- Why: SRS FR‑19. Ensure tag parity without re‑encoding; useful after tag edits on FLACs.
-- Scope:
-  - Implement `--mode sync-tags` (GUI option). For each source with existing output, open FLAC and MP4 and synchronize tags/cover art in place.
-  - Reuse/extend `src/pac/metadata.py` normalization (Unicode NFC, whitespace). Only write when differences detected.
-  - Emit `tags` events with `ok|updated|warn|error`. Respect `--verify-tags` and `--verify-strict` when verifying after sync.
-  - Missing or stale sources are planned for normal encode.
-- Accept: On a corpus with updated FLAC tags, MP4s are updated in place; summary reports numbers of updated vs unchanged; strict mode fails files with tag discrepancies.
-- Refs: `src/pac/metadata.py`, `src/pac/planner.py`, `main.py`, `app/gui/main.py`.
+[x] # 17. Mode: Metadata sync (REMOVED)
+- Superseded by `retag` action in stateless planner.
 
-[ ] # 18. Mode: Force full rebuild (convert all; overwrite; update DB)
-- Why: SRS FR‑20. Recreate outputs under new encoder settings or quality.
-- Scope:
-  - Implement `--mode force-rebuild` (GUI guarded action). Planner schedules all sources regardless of DB; encoder overwrites destination atomically per §3.5.
-  - Add confirmation prompt in CLI/GUI; include encoder and quality in the prompt text.
-  - After success, upsert `files` with new `encoder`, `vbr_quality`, `container`, `size`, `mtime`, and `last_converted_at`; record per-file in `file_runs`.
-- Accept: All inputs are re‑encoded; previous outputs replaced; DB reflects new settings; summary shows total re-encoded count equals scanned count.
-- Refs: `src/pac/planner.py`, `src/pac/encoder.py`, `src/pac/db.py`, `main.py`, `app/gui/main.py`.
+[ ] # 18. Force re-encode (kept but simplified)
+- New flag `--force-reencode` replaces prior mode; no DB updates.
