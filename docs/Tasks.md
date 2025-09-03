@@ -22,13 +22,13 @@ The project pivots to a stateless design. We remove the local SQLite DB and use 
 - Accept: Scan lists entries and fingerprints; handles duplicates deterministically.
 - Refs: `src/pac/dest_index.py` (new).
 
-[ ] # C. Planner v2 (stateless actions)
+[x] # C. Planner v2 (stateless actions)
 - Why: Decide {skip, convert, rename, retag, prune} from source/dest + PAC_*.
 - Scope: Replace DB-based planner; implement rules per Design v0.2.
 - Accept: Dry-run shows counts; executes correctly; JSON summary unchanged in spirit.
 - Refs: `src/pac/planner.py`.
 
-[ ] # D. CLI cleanup and new flags
+[x] # D. CLI cleanup and new flags
 - Why: Simpler UX; remove DB knobs.
 - Scope: Drop `init-db`, `commit-batch-size`, `--mode {reconcile,sync-tags,force-rebuild}`.
   - Add `--retag-existing` (default on), `--rename` (default on), `--prune`, `--no-adopt`, `--force-reencode`.

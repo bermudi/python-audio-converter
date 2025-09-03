@@ -39,12 +39,12 @@ from pac.metadata import (  # noqa: E402
     write_pac_tags_mp4,
     write_pac_tags_opus,
 )
-from pac import db as pac_db  # noqa: E402
 from pac.scanner import scan_flac_files  # noqa: E402
 from pac.scheduler import WorkerPool  # noqa: E402
 from pac.planner import plan_changes  # noqa: E402
 from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
 from pac.paths import resolve_collisions, sanitize_rel_path  # noqa: E402
+from pac.dest_index import build_dest_index  # noqa: E402
 
 
 EXIT_OK = 0
@@ -98,10 +98,7 @@ def cmd_preflight() -> int:
 
 
 def cmd_init_db() -> int:
-    path = pac_db.get_default_db_path()
-    conn = pac_db.connect(path)
-    conn.close()
-    logger.info(f"DB initialized at: {path}")
+    logger.warning("init-db is deprecated in stateless mode and does nothing")
     return EXIT_OK
 
 
@@ -389,9 +386,11 @@ def cmd_convert_dir(
     hash_streaminfo: bool,
     verbose: bool,
     dry_run: bool,
-    force: bool,
-    mode: str,
-    commit_batch_size: int,
+    force_reencode: bool,
+    allow_rename: bool,
+    retag_existing: bool,
+    prune_orphans: bool,
+    no_adopt: bool,
     log_json_path: Optional[str] = None,
     pcm_codec: str = "pcm_s24le",
     verify_tags: bool = False,
@@ -433,7 +432,7 @@ def cmd_convert_dir(
                     return EXIT_PREFLIGHT_FAILED
 
     d_preflight = time.time() - t_preflight_s
-    quality_for_db = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
+    quality_for_run = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
 
     # Scan
     t_scan_s = time.time()
@@ -443,72 +442,31 @@ def cmd_convert_dir(
         logger.info("No .flac files found")
         return EXIT_OK
 
-    # DB and plan
-    t_db_s = time.time()
-    conn = pac_db.connect()
-    try:
-        # Reconcile destination: pre-populate DB for sources with existing outputs
-        reconciled_srcs: set[Path] = set()
-        existing: set[Path] = set()
-        if mode == "reconcile":
-            # Build set of existing relative output paths under out_root
-            for dirpath, _, filenames in os.walk(out_root):
-                d = Path(dirpath)
-                for fn in filenames:
-                    try:
-                        rel = (d / fn).relative_to(out_root)
-                    except Exception:
-                        continue
-                    existing.add(rel)
-            # Upsert DB entries for sources whose expected output already exists
-            for sf in files:
-                final_suffix = ".opus" if codec == "opus" else ".m4a"
-                out_rel = sanitize_rel_path(sf.rel_path, final_suffix=final_suffix)
-                if out_rel in existing:
-                    try:
-                        pac_db.upsert_file(
-                            conn,
-                            src_path=str(sf.path),
-                            rel_path=str(sf.rel_path),
-                            size=sf.size or 0,
-                            mtime_ns=sf.mtime_ns or 0,
-                            flac_md5=sf.flac_md5,
-                            output_rel=str(out_rel),
-                            encoder=(
-                                "qaac"
-                                if selected_encoder == "qaac"
-                                else ("fdkaac" if selected_encoder == "fdkaac" else "libfdk_aac")
-                            ),
-                            vbr_quality=(tvbr if selected_encoder == "qaac" else vbr),
-                            container=codec,
-                        )
-                        reconciled_srcs.add(sf.path)
-                    except Exception:
-                        pass
-            try:
-                conn.commit()
-            except Exception:
-                pass
+    # Destination index and plan (stateless)
+    t_idx_s = time.time()
+    dest_index = build_dest_index(out_root)
+    d_db = time.time() - t_idx_s
+    t_plan_s = time.time()
+    plan = plan_changes(
+        files,
+        dest_index,
+        codec=codec,
+        vbr_quality=tvbr if selected_encoder == "qaac" else vbr,
+        opus_vbr_kbps=opus_vbr_kbps,
+        encoder=selected_encoder,
+        force_reencode=force_reencode,
+        allow_rename=allow_rename,
+        retag_existing=retag_existing,
+        prune_orphans=prune_orphans,
+        no_adopt=no_adopt,
+    )
+    d_plan = time.time() - t_plan_s
 
-        db_idx = pac_db.fetch_files_index(conn)
-        d_db = time.time() - t_db_s
-        t_plan_s = time.time()
-        plan = plan_changes(
-            files,
-            db_idx,
-            codec=codec,
-            vbr_quality=tvbr if selected_encoder == "qaac" else vbr,
-            opus_vbr_kbps=opus_vbr_kbps,
-            encoder=selected_encoder,
-            force=force,
-        )
-        d_plan = time.time() - t_plan_s
-    finally:
-        pass
-
-    to_convert = [pi for pi in plan if pi.decision == "convert"]
-    unchanged = [pi for pi in plan if pi.decision == "skip"]
-
+    to_convert = [pi for pi in plan if pi.action == "convert"]
+    unchanged = [pi for pi in plan if pi.action == "skip"]
+    to_rename = [pi for pi in plan if pi.action == "rename"]
+    to_retag = [pi for pi in plan if pi.action == "retag"]
+    to_prune = [pi for pi in plan if pi.action == "prune"]
 
     # Always provide basic run info
     max_workers = workers or (os.cpu_count() or 1)
@@ -516,7 +474,7 @@ def cmd_convert_dir(
     logger.info(
         f"Codec: {codec} | Selected encoder: {selected_encoder} | Quality: {quality_str}"
         f" | PCM: {pcm_codec} | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
-        f" | Force: {'on' if force else 'off'} | Mode: {mode}"
+        f" | Force: {'on' if force_reencode else 'off'} | Rename: {'on' if allow_rename else 'off'} | Retag: {'on' if retag_existing else 'off'} | Prune: {'on' if prune_orphans else 'off'} | Adopt: {'off' if no_adopt else 'on'}"
     )
     # Show encoder binary path for transparency
     if selected_encoder == "libfdk_aac":
@@ -526,102 +484,30 @@ def cmd_convert_dir(
     elif selected_encoder == "fdkaac" and st_fdk is not None and getattr(st_fdk, 'fdkaac_path', None):
         logger.info(f"Encoder path: fdkaac -> {st_fdk.fdkaac_path}")
     logger.info(f"Source: {src_root} -> Dest: {out_root}")
-    logger.info(f"Planned: {len(plan)} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)}")
+    logger.info(
+        f"Planned: {len(plan)} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {len(to_rename)} | Retag: {len(to_retag)} | Prune: {len(to_prune)}"
+    )
 
     # Concise plan breakdown by change reason
-    if plan:
-        if force:
-            logger.info(f"Plan breakdown: forced={len(to_convert)}")
-        else:
-            not_in_db = 0
-            changed_size = 0
-            changed_mtime = 0
-            changed_md5 = 0
-            changed_quality = 0
-            changed_encoder = 0
-            for pi in plan:
-                if pi.decision == "skip":
-                    continue
-                if pi.reason == "not in DB":
-                    not_in_db += 1
-                elif pi.reason.startswith("changed: "):
-                    parts = [p.strip() for p in pi.reason[len("changed: "):].split(",")]
-                    for p in parts:
-                        if p == "size":
-                            changed_size += 1
-                        elif p == "mtime":
-                            changed_mtime += 1
-                        elif p == "md5":
-                            changed_md5 += 1
-                        elif p == "quality":
-                            changed_quality += 1
-                        elif p == "encoder":
-                            changed_encoder += 1
-        if not force:
-            if any([not_in_db, changed_size, changed_mtime, changed_md5, changed_quality, changed_encoder]):
-                logger.info(
-                    "Plan breakdown: "
-                    + f"new={not_in_db} "
-                    + f"size={changed_size} mtime={changed_mtime} md5={changed_md5} "
-                    + f"quality={changed_quality} encoder={changed_encoder}"
-                )
+    if plan and force_reencode:
+        logger.info(f"Plan breakdown: forced={len(to_convert)}")
 
-    # Prepare run settings and insert run row before any file rows
-    started_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    settings = {
-        "source": str(src_root),
-        "dest": str(out_root),
-        "codec": codec,
-        "encoder": selected_encoder,
-        "quality": quality_for_db,
-        "pcm_codec": pcm_codec,
-        "workers": max_workers,
-        "hash": bool(hash_streaminfo),
-        "force": bool(force),
-        "mode": mode,
-        "ffmpeg_path": getattr(st, "ffmpeg_path", None),
-        "ffmpeg_version": getattr(st, "ffmpeg_version", None),
-        "qaac_version": getattr(st_qaac, "qaac_version", None) if st_qaac is not None else None,
-        "fdkaac_version": getattr(st_fdk, "fdkaac_version", None) if st_fdk is not None else None,
-    }
-    run_id = pac_db.insert_run(conn, started_at=started_iso, ffmpeg_version=getattr(st, "ffmpeg_version", None), settings=settings)
-    conn.commit()
+    # Stateless run: record summary only at the end
 
     # Dry-run: show planned actions and exit without encoding
     if dry_run:
         logger.info("Plan details:")
         for pi in plan:
-            if pi.decision == "convert":
+            if pi.action == "convert":
                 logger.info(f"CONVERT  {pi.rel_path} -> {pi.output_rel} | {pi.reason}")
+            elif pi.action == "rename":
+                logger.info(f"RENAME   {pi.dest_rel} -> {pi.output_rel} | {pi.reason}")
+            elif pi.action == "retag":
+                logger.info(f"RETAG    {pi.output_rel} | {pi.reason}")
+            elif pi.action == "prune":
+                logger.info(f"PRUNE    {pi.dest_rel} | {pi.reason}")
             else:
                 logger.info(f"SKIP     {pi.rel_path} | {pi.reason}")
-        # Record skipped files in DB for audit even in dry-run as per tracking (status=skipped)
-        try:
-            for pi in plan:
-                if pi.decision == "skip":
-                    pac_db.insert_file_run(
-                        conn,
-                        run_id=run_id,
-                        src_path=str(pi.src_path),
-                        status="skipped",
-                        reason=("reconciled" if (mode == "reconcile" and 'reconciled_srcs' in locals() and pi.src_path in reconciled_srcs) else pi.reason),
-                        elapsed_ms=None,
-                    )
-            pac_db.finish_run(
-                conn,
-                run_id,
-                finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                stats={
-                    "planned": len(plan),
-                    "to_convert": len(to_convert),
-                    "unchanged": len(unchanged),
-                    "converted": 0,
-                    "failed": 0,
-                },
-            )
-            conn.commit()
-        except Exception:
-            pass
         return EXIT_OK
 
     if verbose:
@@ -631,12 +517,15 @@ def cmd_convert_dir(
             + (f", qaac probe = {d_probe_qa:.3f}s" if 'd_probe_qa' in locals() else "")
             + (f", fdkaac probe = {d_probe_fd:.3f}s" if 'd_probe_fd' in locals() else "")
         )
-        logger.debug(f"Scan: {len(files)} files in {d_scan:.3f}s | DB: {d_db:.3f}s | Plan: {d_plan:.3f}s")
+        logger.debug(f"Scan: {len(files)} files in {d_scan:.3f}s | Index: {d_db:.3f}s | Plan: {d_plan:.3f}s")
 
     pool = WorkerPool(max_workers=max_workers)
 
     converted = 0
     failed = 0
+    renamed = 0
+    retagged = 0
+    pruned = 0
 
     t_encode_s = time.time()
     # Verification counters
@@ -648,7 +537,7 @@ def cmd_convert_dir(
     # Collect results as they complete and update DB for successes
     total_bytes = 0
     done = 0
-    since_commit = 0
+    since_commit = 0  # retained for structure; no DB commits in stateless
 
     # Optional: sync-tags mode processes unchanged items with tag copy + verify
     tag_sync_processed = 0
@@ -656,158 +545,65 @@ def cmd_convert_dir(
     tag_sync_warn = 0
     tag_sync_failed = 0
 
-    if mode == "force-rebuild" and not dry_run:
-        # Safety confirmation
+    if force_reencode and not dry_run:
         try:
-            prompt = f"Force rebuild will re-encode {len(plan)} files. Continue? [y/N]: "
+            prompt = f"Force re-encode will process {len(to_convert)} files. Continue? [y/N]: "
             resp = input(prompt)
             if str(resp).strip().lower() not in {"y", "yes"}:
-                logger.warning("Force rebuild cancelled by user")
-                pac_db.finish_run(
-                    conn,
-                    run_id,
-                    finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    stats={
-                        "planned": len(plan),
-                        "to_convert": len(to_convert),
-                        "unchanged": len(unchanged),
-                        "converted": 0,
-                        "failed": 0,
-                    },
-                )
-                conn.commit()
+                logger.warning("Force re-encode cancelled by user")
                 return EXIT_OK
         except Exception:
             pass
 
-    if mode == "sync-tags":
-        bound = max(1, max_workers * 2)
-        stop_event = threading.Event()
+    # Execute filesystem actions first (rename, retag, prune)
+    for pi in to_rename:
+        try:
+            src_p = out_root / (pi.dest_rel or Path(""))
+            dst_p = out_root / (pi.output_rel or Path(""))
+            dst_p.parent.mkdir(parents=True, exist_ok=True)
+            src_p.replace(dst_p)
+            renamed += 1
+            logger.info(f"RENAME OK  {pi.dest_rel} -> {pi.output_rel}")
+        except Exception as e:
+            failed += 1
+            logger.error(f"RENAME ERR {pi.dest_rel} -> {pi.output_rel}: {e}")
 
-        def _tag_task(pi):
-            dp = out_root / pi.output_rel
-            t0 = time.time()
-            try:
-                if codec == "opus":
-                    copy_tags_flac_to_opus(pi.src_path, dp)
-                else:
-                    copy_tags_flac_to_mp4(pi.src_path, dp)
-                disc = []
-                status = "ok"
-                if verify_tags:
-                    try:
-                        if codec == "opus":
-                            disc = verify_tags_flac_vs_opus(pi.src_path, dp)
-                        else:
-                            disc = verify_tags_flac_vs_mp4(pi.src_path, dp)
-                    except Exception as e:
-                        disc = [f"verify-exception: {e}"]
-                    status = "ok" if not disc else ("failed" if verify_strict else "warn")
-                return (pi, 0, int((time.time() - t0) * 1000), status, disc)
-            except Exception as e:
-                return (pi, 1, int((time.time() - t0) * 1000), "failed", [f"exception: {e}"])
-
-        for pi, rc_ms_status in pool.imap_unordered_bounded(_tag_task, unchanged, max_pending=bound, stop_event=stop_event):
-            # Unpack
-            _, rc, elapsed_ms, status, disc = rc_ms_status if isinstance(rc_ms_status, tuple) else (None, 1, 0, "failed", ["bad-return"])
-            tag_sync_processed += 1
-            try:
-                reason = f"sync-tags: {status}" + (f" | {', '.join(disc)}" if disc else "")
-                pac_db.insert_file_run(
-                    conn,
-                    run_id=run_id,
-                    src_path=str(pi.src_path),
-                    status="skipped",
-                    reason=reason,
-                    elapsed_ms=elapsed_ms,
+    for pi in to_retag:
+        try:
+            dp = out_root / (pi.output_rel or Path(""))
+            if codec == "opus" or (dp.suffix.lower() == ".opus"):
+                write_pac_tags_opus(
+                    dp,
+                    src_md5=str(pi.flac_md5 or ""),
+                    encoder="libopus" if codec == "opus" else str(pi.encoder),
+                    quality=str(pi.vbr_quality),
+                    version="0.2",
+                    source_rel=str(pi.rel_path or ""),
                 )
-                since_commit += 1
-            except Exception:
-                pass
-            if status == "ok":
-                tag_sync_ok += 1
-            elif status == "warn":
-                tag_sync_warn += 1
             else:
-                tag_sync_failed += 1
-            if since_commit >= max(1, commit_batch_size):
-                try:
-                    conn.commit()
-                    since_commit = 0
-                except Exception:
-                    pass
-        # After processing, do not double-insert skipped entries for unchanged
-    else:
-        # Persist skipped items (unchanged) as file_runs
-        for pi in unchanged:
-            try:
-                pac_db.insert_file_run(
-                    conn,
-                    run_id=run_id,
-                    src_path=str(pi.src_path),
-                    status="skipped",
-                    reason=("reconciled" if (mode == "reconcile" and 'reconciled_srcs' in locals() and pi.src_path in reconciled_srcs) else pi.reason),
-                    elapsed_ms=None,
+                write_pac_tags_mp4(
+                    dp,
+                    src_md5=str(pi.flac_md5 or ""),
+                    encoder=str(pi.encoder),
+                    quality=str(pi.vbr_quality),
+                    version="0.2",
+                    source_rel=str(pi.rel_path or ""),
                 )
-                since_commit += 1
-            except Exception:
-                pass
-        if since_commit:
-            try:
-                conn.commit()
-                since_commit = 0
-            except Exception:
-                pass
-    # In sync-tags mode, do not perform any re-encoding; mark would-be converts as skipped.
-    if mode == "sync-tags":
-        for pi in to_convert:
-            try:
-                pac_db.insert_file_run(
-                    conn,
-                    run_id=run_id,
-                    src_path=str(pi.src_path),
-                    status="skipped",
-                    reason="sync-tags: no-encode",
-                    elapsed_ms=None,
-                )
-                since_commit += 1
-            except Exception:
-                pass
-        if since_commit:
-            try:
-                conn.commit()
-                since_commit = 0
-            except Exception:
-                pass
-        # Prevent the encoding loop from running any work
-        to_convert = []
-    # In reconcile mode, only convert missing outputs; skip items whose output already exists
-    elif mode == "reconcile":
-        if 'existing' in locals() and existing:
-            still_convert = []
-            for pi in to_convert:
-                try:
-                    if Path(pi.output_rel) in existing:
-                        pac_db.insert_file_run(
-                            conn,
-                            run_id=run_id,
-                            src_path=str(pi.src_path),
-                            status="skipped",
-                            reason="reconcile: existing-output",
-                            elapsed_ms=None,
-                        )
-                        since_commit += 1
-                    else:
-                        still_convert.append(pi)
-                except Exception:
-                    still_convert.append(pi)
-            if since_commit:
-                try:
-                    conn.commit()
-                    since_commit = 0
-                except Exception:
-                    pass
-            to_convert = still_convert
+            retagged += 1
+            logger.info(f"RETAG  OK  {pi.output_rel}")
+        except Exception as e:
+            failed += 1
+            logger.error(f"RETAG  ERR {pi.output_rel}: {e}")
+
+    for pi in to_prune:
+        try:
+            dp = out_root / (pi.dest_rel or Path(""))
+            dp.unlink(missing_ok=True)
+            pruned += 1
+            logger.info(f"PRUNE  OK  {pi.dest_rel}")
+        except Exception as e:
+            failed += 1
+            logger.error(f"PRUNE  ERR {pi.dest_rel}: {e}")
     # Bounded processing via WorkerPool to keep <= ~2x workers in flight
     bound = max(1, max_workers * 2)
     stop_event = threading.Event()  # Hook for future GUI pause/cancel
@@ -864,39 +660,7 @@ def cmd_convert_dir(
                     )
             except Exception as e:
                 logger.bind(action="pac_tags", file=str(pi.rel_path), status="warn", reason=str(e)).warning("PAC_* embed failed")
-            # Upsert DB for successful encode
-            try:
-                pac_db.upsert_file(
-                    conn,
-                    src_path=str(pi.src_path),
-                    rel_path=str(pi.rel_path),
-                    size=pi.size or 0,
-                    mtime_ns=pi.mtime_ns or 0,
-                    flac_md5=pi.flac_md5,
-                    output_rel=str(pi.output_rel),
-                    encoder=pi.encoder,
-                    vbr_quality=pi.vbr_quality,
-                    container=codec,
-                )
-                since_commit += 1
-            except Exception:
-                pass
-            # file_runs: converted
-            try:
-                pac_db.insert_file_run(
-                    conn,
-                    run_id=run_id,
-                    src_path=str(pi.src_path),
-                    status="converted",
-                    reason=pi.reason,
-                    elapsed_ms=int(elapsed_s * 1000),
-                )
-                since_commit += 1
-            except Exception:
-                pass
-            if since_commit >= max(1, commit_batch_size):
-                conn.commit()
-                since_commit = 0
+            # no DB ops in stateless mode
             try:
                 sz = dest_path.stat().st_size
                 total_bytes += sz
@@ -908,58 +672,19 @@ def cmd_convert_dir(
             failed += 1
             logger.bind(action="encode", file=str(pi.rel_path), status="error", elapsed_ms=int(elapsed_s*1000)).error("encode failed")
             logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
-            # file_runs: failed
-            try:
-                pac_db.insert_file_run(
-                    conn,
-                    run_id=run_id,
-                    src_path=str(pi.src_path),
-                    status="failed",
-                    reason=pi.reason,
-                    elapsed_ms=int(elapsed_s * 1000),
-                )
-                since_commit += 1
-                if since_commit >= max(1, commit_batch_size):
-                    conn.commit()
-                    since_commit = 0
-            except Exception:
-                pass
+            # no DB ops in stateless mode
 
-    # Final commit for any remaining batched operations
-    try:
-        if since_commit > 0:
-            conn.commit()
-    except Exception:
-        pass
     pool.shutdown()
-    # Finish run
-    try:
-        pac_db.finish_run(
-            conn,
-            run_id,
-            finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            stats={
-                "planned": len(plan),
-                "to_convert": len(to_convert),
-                "unchanged": len(unchanged),
-                "converted": converted,
-                "failed": failed,
-            },
-        )
-        conn.commit()
-    except Exception:
-        pass
-    conn.close()
     d_encode = time.time() - t_encode_s
 
     total = len(plan)
     logger.info(
-        f"Planned: {total} | Convert: {len(to_convert)} | Unchanged: {len(unchanged)} | Converted: {converted} | Failed: {failed}"
+        f"Planned: {total} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {renamed} | Retag: {retagged} | Prune: {pruned} | Converted: {converted} | Failed: {failed}"
     )
     # Always print concise timing summary
     d_total = time.time() - t_preflight_s
     logger.info(
-        f"Timing: total={d_total:.3f}s preflight={d_preflight:.3f}s scan={d_scan:.3f}s db={d_db:.3f}s plan={d_plan:.3f}s encode={d_encode:.3f}s"
+        f"Timing: total={d_total:.3f}s preflight={d_preflight:.3f}s scan={d_scan:.3f}s index={d_db:.3f}s plan={d_plan:.3f}s encode={d_encode:.3f}s"
     )
     if converted:
         thr = converted / d_encode if d_encode > 0 else float('inf')
@@ -971,15 +696,17 @@ def cmd_convert_dir(
         "dest": str(out_root),
         "codec": codec,
         "encoder": selected_encoder,
-        "quality": quality_for_db,
+        "quality": quality_for_run,
         "workers": max_workers,
         "hash": bool(hash_streaminfo),
-        "force": bool(force),
-        "mode": mode,
+        "force_reencode": bool(force_reencode),
         "counts": {
             "planned": total,
             "to_convert": len(to_convert),
-            "unchanged": len(unchanged),
+            "skipped": len(unchanged),
+            "renamed": renamed,
+            "retagged": retagged,
+            "pruned": pruned,
             "converted": converted,
             "failed": failed,
         },
@@ -992,17 +719,11 @@ def cmd_convert_dir(
             "warn": int(ver_warn),
             "failed": int(ver_failed),
         },
-        "tag_sync": {
-            "processed": int(tag_sync_processed),
-            "ok": int(tag_sync_ok),
-            "warn": int(tag_sync_warn),
-            "failed": int(tag_sync_failed),
-        } if mode == "sync-tags" else None,
         "timing_s": {
             "total": round(d_total, 3),
             "preflight": round(d_preflight, 3),
             "scan": round(d_scan, 3),
-            "db": round(d_db, 3),
+            "index": round(d_db, 3),
             "plan": round(d_plan, 3),
             "encode": round(d_encode, 3),
         },
@@ -1153,25 +874,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show plan (convert/skip/reasons) and exit without encoding",
     )
-    mode_group = p_dir.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-encode all scanned files regardless of DB state (deprecated; use --mode force-rebuild)",
-    )
-    mode_group.add_argument(
-        "--mode",
-        dest="mode",
-        choices=["incremental", "reconcile", "sync-tags", "force-rebuild"],
-        default=None,
-        help="Operation mode: incremental (default), reconcile destination, sync-tags, or force-rebuild",
-    )
+    # Stateless planner flags
     p_dir.add_argument(
-        "--commit-batch-size",
-        type=int,
-        default=None,
-        help="Batch DB commits per N successful files (default from settings)",
+        "--force-reencode",
+        action="store_true",
+        help="Force re-encode all sources regardless of existing outputs",
     )
+    rename_group = p_dir.add_mutually_exclusive_group()
+    rename_group.add_argument("--rename", dest="allow_rename", action="store_const", const=True, default=True, help="Allow planner to rename existing outputs to new paths")
+    rename_group.add_argument("--no-rename", dest="allow_rename", action="store_const", const=False, help="Disallow rename actions")
+    retag_group = p_dir.add_mutually_exclusive_group()
+    retag_group.add_argument("--retag-existing", dest="retag_existing", action="store_const", const=True, default=True, help="Retag existing outputs with missing/old PAC_* tags")
+    retag_group.add_argument("--no-retag-existing", dest="retag_existing", action="store_const", const=False, help="Do not retag existing outputs")
+    p_dir.add_argument("--prune", dest="prune_orphans", action="store_true", help="Delete destination files whose PAC_SRC_MD5 no longer exists in sources")
+    p_dir.add_argument("--no-adopt", dest="no_adopt", action="store_true", help="Do not adopt/retag outputs missing PAC_* tags even if content matches")
     p_dir.add_argument(
         "--verify-tags",
         action="store_true",
@@ -1221,21 +937,15 @@ def main(argv: list[str] | None = None) -> int:
         opus_vbr_kbps_eff = args.opus_vbr_kbps if args.opus_vbr_kbps is not None else cfg.opus_vbr_kbps
         workers_eff = args.workers if args.workers is not None else (cfg.workers or (os.cpu_count() or 1))
         hash_eff = cfg.hash_streaminfo if args.hash_streaminfo is None else args.hash_streaminfo
-        commit_eff = args.commit_batch_size if args.commit_batch_size is not None else cfg.commit_batch_size
         pcm_eff = args.pcm_codec if getattr(args, "pcm_codec", None) is not None else cfg.pcm_codec
         ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
         ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
-        # Derive effective mode and force: --mode overrides legacy --force; fall back to config
-        if getattr(args, "mode", None):
-            mode_eff = args.mode
-            force_eff = True if args.mode == "force-rebuild" else False
-        else:
-            if args.force or cfg.force:
-                mode_eff = "force-rebuild"
-                force_eff = True
-            else:
-                mode_eff = getattr(cfg, "mode", "incremental")
-                force_eff = True if mode_eff == "force-rebuild" else False
+        # Stateless planner flags (no config defaults yet; rely on CLI defaults)
+        force_reencode_eff = bool(getattr(args, "force_reencode", False))
+        allow_rename_eff = bool(getattr(args, "allow_rename", True))
+        retag_existing_eff = bool(getattr(args, "retag_existing", True))
+        prune_orphans_eff = bool(getattr(args, "prune_orphans", False))
+        no_adopt_eff = bool(getattr(args, "no_adopt", False))
         return cmd_convert_dir(
             args.in_dir,
             args.out_dir,
@@ -1247,9 +957,11 @@ def main(argv: list[str] | None = None) -> int:
             hash_streaminfo=hash_eff,
             verbose=args.verbose,
             dry_run=args.dry_run,
-            force=force_eff,
-            mode=mode_eff,
-            commit_batch_size=commit_eff,
+            force_reencode=force_reencode_eff,
+            allow_rename=allow_rename_eff,
+            retag_existing=retag_existing_eff,
+            prune_orphans=prune_orphans_eff,
+            no_adopt=no_adopt_eff,
             log_json_path=cfg.log_json,
             pcm_codec=pcm_eff,
             verify_tags=ver_tags_eff,
