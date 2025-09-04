@@ -35,31 +35,31 @@ The project pivots to a stateless design. We remove the local SQLite DB and use 
 - Accept: Help text reflects new flags; old options removed.
 - Refs: `main.py`.
 
-[ ] # E. GUI: plan categories and execution
+[x] # E. GUI: plan categories and execution
 - Why: Expose new planner outcomes and progress.
 - Scope: Show counts by action; support pause/cancel; apply rename/retag/prune per flags.
 - Accept: Smooth progress; responsive UI; summary matches CLI.
 - Refs: `app/gui/main.py`.
 
-[ ] # F. Adopt policy (default) and retag
+[x] # F. Adopt policy (default) and retag
 - Why: Keep prior outputs; add PAC_* when missing.
 - Scope: If output exists at expected relpath but lacks PAC_*, treat as up-to-date and retag to add PAC_* unless `--no-adopt`.
 - Accept: Legacy outputs retained and annotated; strict mode re-encodes.
 - Refs: `src/pac/metadata.py`, `src/pac/planner.py`.
 
-[ ] # G. Orphan prune (optional)
+[x] # G. Orphan prune (optional)
 - Why: Clean destination of files with no source counterpart.
 - Scope: Plan orphans; delete only with `--prune` (confirm in GUI/CLI).
 - Accept: Dry-run shows orphans; deletes honored only when requested.
 - Refs: `src/pac/planner.py`, `main.py`.
 
-[ ] # H. Perf polish for scans
+[x] # H. Perf polish for scans
 - Why: Large libraries; fast re-scans.
 - Scope: Parallel tag reads; memory-bounded iteration; efficient I/O.
 - Accept: Scan scales to 100k+ files with stable memory.
 - Refs: `src/pac/dest_index.py`, `src/pac/scanner.py`.
 
-[ ] # I. Docs update (Quickstart/Design/SRS)
+[x] # I. Docs update (Quickstart/Design/SRS)
 - Why: Reflect DB-less pivot and flags.
 - Scope: Update Design.md, SRS.md, README.md; describe PAC_*; rename/prune behavior.
 - Accept: Docs match code.
