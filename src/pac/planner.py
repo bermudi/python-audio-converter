@@ -134,21 +134,40 @@ def plan_changes(
                         )
                     )
             else:
-                # Expected exists but MD5 unknown or differs: convert
-                plan.append(
-                    PlanItem(
-                        action="convert",
-                        reason="expected missing PAC or MD5 mismatch",
-                        src_path=sf.path,
-                        rel_path=sf.rel_path,
-                        flac_md5=sf.flac_md5,
-                        output_rel=out_rel,
-                        codec=codec,
-                        encoder=encoder,
-                        vbr_quality=desired_quality,
-                        dest_rel=expected.rel_path,
+                # Expected exists but MD5 unknown or differs.
+                if not expected.pac_src_md5 and not no_adopt:
+                    # Adopt the file: it's at the right path but has no PAC tags.
+                    plan.append(
+                        PlanItem(
+                            action="retag",
+                            reason="adopt: missing PAC tags",
+                            src_path=sf.path,
+                            rel_path=sf.rel_path,
+                            flac_md5=sf.flac_md5,
+                            output_rel=out_rel,
+                            codec=codec,
+                            encoder=encoder,
+                            vbr_quality=desired_quality,
+                            dest_rel=expected.rel_path,
+                        )
                     )
-                )
+                else:
+                    # Convert because MD5 mismatches, or we are not allowed to adopt.
+                    reason = "MD5 mismatch" if expected.pac_src_md5 else "adopt disabled for file with no PAC"
+                    plan.append(
+                        PlanItem(
+                            action="convert",
+                            reason=reason,
+                            src_path=sf.path,
+                            rel_path=sf.rel_path,
+                            flac_md5=sf.flac_md5,
+                            output_rel=out_rel,
+                            codec=codec,
+                            encoder=encoder,
+                            vbr_quality=desired_quality,
+                            dest_rel=expected.rel_path,
+                        )
+                    )
             continue
 
         # No expected file; can we rename an existing output with the same MD5?

@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 @dataclass
@@ -16,32 +17,52 @@ class SourceFile:
     flac_md5: Optional[str] = None  # STREAMINFO MD5, not a full-file hash
 
 
-def scan_flac_files(src_root: Path, compute_flac_md5: bool = True) -> List[SourceFile]:
+def scan_flac_files(src_root: Path, compute_flac_md5: bool = True, max_workers: Optional[int] = None) -> List[SourceFile]:
     src_root = src_root.resolve()
     results: List[SourceFile] = []
+
+    # First, discover all flac files
+    flac_paths = []
     for dirpath, _, filenames in os.walk(src_root):
         for name in filenames:
-            if not name.lower().endswith(".flac"):
-                continue
-            full = Path(dirpath) / name
+            if name.lower().endswith(".flac"):
+                flac_paths.append(Path(dirpath) / name)
+
+    if not compute_flac_md5:
+        for full in flac_paths:
             try:
                 st = full.stat()
+                rel = full.relative_to(src_root)
+                results.append(SourceFile(
+                    path=full,
+                    rel_path=rel,
+                    size=st.st_size,
+                    mtime_ns=st.st_mtime_ns,
+                    flac_md5=None,
+                ))
             except OSError:
                 continue
-            rel = full.relative_to(src_root)
-            md5 = None
-            if compute_flac_md5:
-                try:
-                    md5 = read_flac_streaminfo_md5(full)
-                except Exception:
-                    md5 = None
-            results.append(SourceFile(
-                path=full,
-                rel_path=rel,
-                size=st.st_size,
-                mtime_ns=st.st_mtime_ns,
-                flac_md5=md5,
-            ))
+        return results
+
+    # Now, process them in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_path = {executor.submit(read_flac_streaminfo_md5, path): path for path in flac_paths}
+        for future in as_completed(future_to_path):
+            path = future_to_path[future]
+            try:
+                md5 = future.result()
+                st = path.stat()
+                rel = path.relative_to(src_root)
+                results.append(SourceFile(
+                    path=path,
+                    rel_path=rel,
+                    size=st.st_size,
+                    mtime_ns=st.st_mtime_ns,
+                    flac_md5=md5,
+                ))
+            except Exception:
+                # Log error or handle as needed
+                continue
     return results
 
 

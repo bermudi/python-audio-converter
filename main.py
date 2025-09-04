@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import time
 import threading
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 from loguru import logger
 
@@ -395,7 +395,9 @@ def cmd_convert_dir(
     pcm_codec: str = "pcm_s24le",
     verify_tags: bool = False,
     verify_strict: bool = False,
-) -> int:
+    stop_event: Optional[threading.Event] = None,
+    pause_event: Optional[threading.Event] = None,
+) -> tuple[int, dict[str, Any]]:
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -435,8 +437,9 @@ def cmd_convert_dir(
     quality_for_run = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
 
     # Scan
+    max_workers = workers or (os.cpu_count() or 1)
     t_scan_s = time.time()
-    files = scan_flac_files(src_root, compute_flac_md5=hash_streaminfo)
+    files = scan_flac_files(src_root, compute_flac_md5=hash_streaminfo, max_workers=max_workers)
     d_scan = time.time() - t_scan_s
     if not files:
         logger.info("No .flac files found")
@@ -444,7 +447,7 @@ def cmd_convert_dir(
 
     # Destination index and plan (stateless)
     t_idx_s = time.time()
-    dest_index = build_dest_index(out_root)
+    dest_index = build_dest_index(out_root, max_workers=max_workers)
     d_db = time.time() - t_idx_s
     t_plan_s = time.time()
     plan = plan_changes(
@@ -469,7 +472,6 @@ def cmd_convert_dir(
     to_prune = [pi for pi in plan if pi.action == "prune"]
 
     # Always provide basic run info
-    max_workers = workers or (os.cpu_count() or 1)
     quality_str = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
     logger.info(
         f"Codec: {codec} | Selected encoder: {selected_encoder} | Quality: {quality_str}"
@@ -508,7 +510,17 @@ def cmd_convert_dir(
                 logger.info(f"PRUNE    {pi.dest_rel} | {pi.reason}")
             else:
                 logger.info(f"SKIP     {pi.rel_path} | {pi.reason}")
-        return EXIT_OK
+        plan_summary = {
+            "planned": len(plan),
+            "to_convert": len(to_convert),
+            "skipped": len(unchanged),
+            "renamed": len(to_rename),
+            "retagged": len(to_retag),
+            "pruned": len(to_prune),
+            "converted": 0,
+            "failed": 0,
+        }
+        return EXIT_OK, plan_summary
 
     if verbose:
         logger.debug(
@@ -544,6 +556,17 @@ def cmd_convert_dir(
     tag_sync_ok = 0
     tag_sync_warn = 0
     tag_sync_failed = 0
+
+    if prune_orphans and to_prune and not dry_run:
+        try:
+            prompt = f"Prune will delete {len(to_prune)} files from the destination. This cannot be undone. Continue? [y/N]: "
+            resp = input(prompt)
+            if str(resp).strip().lower() not in {"y", "yes"}:
+                logger.warning("Prune cancelled by user")
+                to_prune = []  # Empty the list so no pruning happens
+        except Exception:
+            logger.warning("Could not get confirmation; cancelling prune.")
+            to_prune = []
 
     if force_reencode and not dry_run:
         try:
@@ -606,7 +629,6 @@ def cmd_convert_dir(
             logger.error(f"PRUNE  ERR {pi.dest_rel}: {e}")
     # Bounded processing via WorkerPool to keep <= ~2x workers in flight
     bound = max(1, max_workers * 2)
-    stop_event = threading.Event()  # Hook for future GUI pause/cancel
 
     def _task(pi):
         dp = out_root / pi.output_rel
@@ -624,7 +646,9 @@ def cmd_convert_dir(
             verify_strict=verify_strict,
         )
 
-    for pi, res in pool.imap_unordered_bounded(_task, to_convert, max_pending=bound, stop_event=stop_event):
+    for pi, res in pool.imap_unordered_bounded(
+        _task, to_convert, max_pending=bound, stop_event=stop_event, pause_event=pause_event
+    ):
         dest_path = out_root / pi.output_rel
         rc, elapsed_s, ver_status = res
         done += 1
@@ -740,7 +764,7 @@ def cmd_convert_dir(
         logger.debug(f"Run summary written: {summary_path}")
     except Exception as e:
         logger.warning(f"Failed to write run summary JSON: {e}")
-    return EXIT_OK if failed == 0 else EXIT_WITH_FILE_ERRORS
+    return EXIT_OK if failed == 0 else EXIT_WITH_FILE_ERRORS, summary["counts"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -946,7 +970,7 @@ def main(argv: list[str] | None = None) -> int:
         retag_existing_eff = bool(getattr(args, "retag_existing", True))
         prune_orphans_eff = bool(getattr(args, "prune_orphans", False))
         no_adopt_eff = bool(getattr(args, "no_adopt", False))
-        return cmd_convert_dir(
+        exit_code, _ = cmd_convert_dir(
             args.in_dir,
             args.out_dir,
             codec=codec_eff,
@@ -967,6 +991,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_tags=ver_tags_eff,
             verify_strict=ver_strict_eff,
         )
+        return exit_code
     p.error("unknown command")
     return 1
 

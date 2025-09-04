@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -94,6 +95,7 @@ class PreflightWorker(QtCore.QThread):
 
 class ConvertWorker(QtCore.QThread):
     finished_with_code = QtCore.Signal(int)
+    plan_ready = QtCore.Signal(dict)
 
     def __init__(
         self,
@@ -108,11 +110,14 @@ class ConvertWorker(QtCore.QThread):
         hash_streaminfo: bool,
         verbose: bool,
         dry_run: bool,
-        force: bool,
-        commit_batch_size: int,
+        force_reencode: bool,
+        allow_rename: bool,
+        retag_existing: bool,
+        prune_orphans: bool,
         verify_tags: bool,
         verify_strict: bool,
         log_json_path: Optional[str],
+        no_adopt: bool,
     ) -> None:
         super().__init__()
         self.src_dir = src_dir
@@ -125,15 +130,32 @@ class ConvertWorker(QtCore.QThread):
         self.hash_streaminfo = hash_streaminfo
         self.verbose = verbose
         self.dry_run = dry_run
-        self.force = force
-        self.commit_batch_size = commit_batch_size
+        self.force_reencode = force_reencode
+        self.allow_rename = allow_rename
+        self.retag_existing = retag_existing
+        self.prune_orphans = prune_orphans
         self.verify_tags = verify_tags
         self.verify_strict = verify_strict
         self.log_json_path = log_json_path
+        self.no_adopt = no_adopt
+
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # Not paused by default
+
+    def cancel(self) -> None:
+        self.stop_event.set()
+
+    def toggle_pause(self) -> None:
+        if self.pause_event.is_set():
+            self.pause_event.clear()  # Pause
+        else:
+            self.pause_event.set()  # Resume
 
     def run(self) -> None:  # type: ignore[override]
         try:
-            code = cmd_convert_dir(
+            # The new cmd_convert_dir will return a tuple (exit_code, plan_summary)
+            code, plan = cmd_convert_dir(
                 str(self.src_dir),
                 str(self.out_dir),
                 codec=self.codec,
@@ -144,12 +166,19 @@ class ConvertWorker(QtCore.QThread):
                 hash_streaminfo=self.hash_streaminfo,
                 verbose=self.verbose,
                 dry_run=self.dry_run,
-                force=self.force,
-                commit_batch_size=self.commit_batch_size,
+                force_reencode=self.force_reencode,
+                allow_rename=self.allow_rename,
+                retag_existing=self.retag_existing,
+                prune_orphans=self.prune_orphans,
                 log_json_path=self.log_json_path,
                 verify_tags=self.verify_tags,
                 verify_strict=self.verify_strict,
+                no_adopt=self.no_adopt,
+                stop_event=self.stop_event,
+                pause_event=self.pause_event,
             )
+            if plan:
+                self.plan_ready.emit(plan)
         except Exception:
             code = EXIT_WITH_FILE_ERRORS
         self.finished_with_code.emit(code)
@@ -245,6 +274,25 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.chk_hash, 2, 0, 1, 3)
         grid.addWidget(self.chk_verify, 2, 3, 1, 2)
         grid.addWidget(self.chk_verify_strict, 2, 5, 1, 1)
+
+        # New stateless planner flags
+        self.chk_rename = QtWidgets.QCheckBox("Rename moved files")
+        self.chk_rename.setChecked(True)  # Default on
+        self.chk_retag = QtWidgets.QCheckBox("Retag existing files")
+        self.chk_retag.setChecked(True)  # Default on
+        self.chk_prune = QtWidgets.QCheckBox("Prune orphans (deletes files)")
+        self.chk_prune.setChecked(False)  # Default off
+        self.chk_force = QtWidgets.QCheckBox("Force re-encode all")
+        self.chk_force.setChecked(False)
+        self.chk_no_adopt = QtWidgets.QCheckBox("Do not adopt legacy files")
+        self.chk_no_adopt.setChecked(False)
+
+        grid.addWidget(self.chk_rename, 3, 0, 1, 2)
+        grid.addWidget(self.chk_retag, 3, 2, 1, 2)
+        grid.addWidget(self.chk_prune, 3, 4, 1, 2)
+        grid.addWidget(self.chk_force, 4, 0, 1, 2)
+        grid.addWidget(self.chk_no_adopt, 4, 2, 1, 2)
+
         form.addRow("Settings:", self._wrap_row(grid))
         # Encoder/quality hint labels
         self.lbl_encoder_status = QtWidgets.QLabel("Encoder: unknown")
@@ -253,14 +301,38 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Quality used:", self.lbl_quality_hint)
         outer.addLayout(form)
 
+        # Plan summary
+        self.plan_group = QtWidgets.QGroupBox("Plan Summary")
+        plan_layout = QtWidgets.QHBoxLayout()
+        self.lbl_plan_convert = QtWidgets.QLabel("Convert: 0")
+        self.lbl_plan_skip = QtWidgets.QLabel("Skip: 0")
+        self.lbl_plan_retag = QtWidgets.QLabel("Retag: 0")
+        self.lbl_plan_rename = QtWidgets.QLabel("Rename: 0")
+        self.lbl_plan_prune = QtWidgets.QLabel("Prune: 0")
+        plan_layout.addWidget(self.lbl_plan_convert)
+        plan_layout.addWidget(self.lbl_plan_skip)
+        plan_layout.addWidget(self.lbl_plan_retag)
+        plan_layout.addWidget(self.lbl_plan_rename)
+        plan_layout.addWidget(self.lbl_plan_prune)
+        self.plan_group.setLayout(plan_layout)
+        self.plan_group.hide()  # Initially hidden
+        outer.addWidget(self.plan_group)
+
         # Action buttons
         actions = QtWidgets.QHBoxLayout()
         self.btn_plan = QtWidgets.QPushButton("Plan (Dry‑Run)")
         self.btn_convert = QtWidgets.QPushButton("Convert")
         self.btn_convert.setDefault(True)
+        self.btn_cancel = QtWidgets.QPushButton("Cancel")
+        self.btn_cancel.hide()
+        self.btn_pause = QtWidgets.QPushButton("Pause")
+        self.btn_pause.hide()
+
         actions.addStretch(1)
         actions.addWidget(self.btn_plan)
         actions.addWidget(self.btn_convert)
+        actions.addWidget(self.btn_pause)
+        actions.addWidget(self.btn_cancel)
         outer.addLayout(actions)
 
         # Progress + log
@@ -279,6 +351,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_dest.clicked.connect(lambda: self._pick_dir(self.edit_dest))
         self.btn_plan.clicked.connect(self.on_plan)
         self.btn_convert.clicked.connect(self.on_convert)
+        self.btn_cancel.clicked.connect(self.on_cancel)
+        self.btn_pause.clicked.connect(self.on_pause_resume)
         self.combo_codec.currentTextChanged.connect(self._on_codec_change)
 
         # Logger → UI
@@ -320,7 +394,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preflight_results = res
         if res.get("ok"):
             txt = (
-                f"ffmpeg: {res.get('ffmpeg')}\n"
+                f"ffmpeg: {res.get('ffmpeg')}
+"
                 f"libfdk_aac: {'YES' if res.get('libfdk_aac') else 'NO'} | "
                 f"libopus: {'YES' if res.get('libopus') else 'NO'} | "
                 f"qaac: {res.get('qaac') or 'NO'} | "
@@ -403,8 +478,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "hash_streaminfo": bool(self.chk_hash.isChecked()),
             "verbose": True,
             "dry_run": False,
-            "force": False,
-            "commit_batch_size": int(self.settings.commit_batch_size),
+            "force_reencode": bool(self.chk_force.isChecked()),
+            "allow_rename": bool(self.chk_rename.isChecked()),
+            "retag_existing": bool(self.chk_retag.isChecked()),
+            "prune_orphans": bool(self.chk_prune.isChecked()),
+            "no_adopt": bool(self.chk_no_adopt.isChecked()),
             "verify_tags": bool(self.chk_verify.isChecked()),
             "verify_strict": bool(self.chk_verify_strict.isChecked()),
             "log_json_path": self.settings.log_json,
@@ -419,21 +497,51 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Missing Destination", "Please select a destination directory")
             return
 
+        if params.get("prune_orphans") and not dry_run:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Confirm Prune",
+                "This will delete files from the destination directory that do not exist in the source. This cannot be undone. Are you sure?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.No:
+                return
+
         # Disable UI during run
         for w in [self.btn_plan, self.btn_convert, self.btn_preflight, self.btn_src, self.btn_dest]:
-            w.setEnabled(False)
+            w.hide()
+
+        self.btn_pause.show()
+        self.btn_cancel.show()
+        self.btn_pause.setEnabled(True)
+        self.btn_cancel.setEnabled(True)
+        self.btn_pause.setText("Pause")
         self.progress.show()
 
         params["dry_run"] = dry_run
         self.worker = ConvertWorker(**params)
+        self.worker.plan_ready.connect(self._on_plan_ready)
         self.worker.finished_with_code.connect(self._on_convert_done)
         self.worker.finished.connect(self._reenable_ui)
         self.worker.start()
 
     def _reenable_ui(self) -> None:
         self.progress.hide()
+        self.btn_pause.hide()
+        self.btn_cancel.hide()
         for w in [self.btn_plan, self.btn_convert, self.btn_preflight, self.btn_src, self.btn_dest]:
+            w.show()
             w.setEnabled(True)
+        self._apply_encoder_ui()
+
+    def _on_plan_ready(self, plan: dict) -> None:
+        self.plan_group.show()
+        self.lbl_plan_convert.setText(f"Convert: {plan.get('to_convert', 0)}")
+        self.lbl_plan_skip.setText(f"Skip: {plan.get('skipped', 0)}")
+        self.lbl_plan_retag.setText(f"Retag: {plan.get('retagged', 0)}")
+        self.lbl_plan_rename.setText(f"Rename: {plan.get('renamed', 0)}")
+        self.lbl_plan_prune.setText(f"Prune: {plan.get('pruned', 0)}")
 
     def _on_convert_done(self, code: int) -> None:
         if code == EXIT_OK:
@@ -446,12 +554,32 @@ class MainWindow(QtWidgets.QMainWindow):
     # Slots
     def on_plan(self) -> None:
         self.log.clear()
+        self.plan_group.hide()
         logger.info("Starting dry‑run (plan)…")
         self._start_convert(dry_run=True)
 
     def on_convert(self) -> None:
+        self.log.clear()
+        self.plan_group.hide()
         logger.info("Starting conversion…")
         self._start_convert(dry_run=False)
+
+    def on_cancel(self) -> None:
+        logger.warning("Cancel requested by user.")
+        if hasattr(self, "worker") and self.worker.isRunning():
+            self.worker.cancel()
+        self.btn_cancel.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+
+    def on_pause_resume(self) -> None:
+        if hasattr(self, "worker") and self.worker.isRunning():
+            self.worker.toggle_pause()
+            if self.btn_pause.text() == "Pause":
+                logger.info("Pausing...")
+                self.btn_pause.setText("Resume")
+            else:
+                logger.info("Resuming...")
+                self.btn_pause.setText("Pause")
 
 
 def main() -> int:

@@ -13,8 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .metadata import read_pac_tags
 
@@ -101,7 +102,7 @@ def _make_entry(dest_root: Path, abs_path: Path) -> DestEntry:
     )
 
 
-def build_dest_index(dest_root: Path) -> DestIndex:
+def build_dest_index(dest_root: Path, max_workers: Optional[int] = None) -> DestIndex:
     """Scan destination root and build indices by rel-path and by PAC_SRC_MD5.
 
     - When PAC_* are missing, entries still appear in by_rel but are absent from by_md5.
@@ -113,15 +114,19 @@ def build_dest_index(dest_root: Path) -> DestIndex:
     by_rel: Dict[Path, DestEntry] = {}
     md5_groups: Dict[str, List[DestEntry]] = {}
 
-    for abs_path in _iter_media_files(dest_root):
-        try:
-            entry = _make_entry(dest_root, abs_path)
-        except Exception:
-            # Skip unreadable/bad files; planner can optionally surface these via separate scan step
-            continue
-        by_rel[entry.rel_path] = entry
-        if entry.pac_src_md5:
-            md5_groups.setdefault(entry.pac_src_md5, []).append(entry)
+    media_files = list(_iter_media_files(dest_root))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_path = {executor.submit(_make_entry, dest_root, path): path for path in media_files}
+        for future in as_completed(future_to_path):
+            try:
+                entry = future.result()
+                by_rel[entry.rel_path] = entry
+                if entry.pac_src_md5:
+                    md5_groups.setdefault(entry.pac_src_md5, []).append(entry)
+            except Exception:
+                # Skip unreadable/bad files
+                continue
 
     # Deterministic ordering of duplicates
     for md5, entries in md5_groups.items():

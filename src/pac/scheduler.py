@@ -30,6 +30,7 @@ class WorkerPool:
         max_pending: int,
         *,
         stop_event: Optional[threading.Event] = None,
+        pause_event: Optional[threading.Event] = None,
     ) -> Iterator[Tuple[Any, Any]]:
         """Yield (item, result) as they complete while keeping <= max_pending futures in flight.
 
@@ -71,6 +72,9 @@ class WorkerPool:
             pass
 
         while active:
+            if pause_event is not None:
+                pause_event.wait()
+
             done_set, _ = wait(active, return_when=FIRST_COMPLETED)
             for fut in done_set:
                 active.remove(fut)
