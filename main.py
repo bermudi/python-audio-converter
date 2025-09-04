@@ -392,6 +392,7 @@ def cmd_convert_dir(
         retag_existing=retag_existing,
         prune_orphans=prune_orphans,
         no_adopt=no_adopt,
+        hash_streaminfo=hash_streaminfo,
     )
     d_plan = time.time() - t_plan_s
 

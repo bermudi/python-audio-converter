@@ -48,6 +48,7 @@ def plan_changes(
     retag_existing: bool = True,
     prune_orphans: bool = False,
     no_adopt: bool = False,
+    hash_streaminfo: bool = True,
 ) -> List[PlanItem]:
     """Create a stateless plan.
 
@@ -94,20 +95,32 @@ def plan_changes(
 
         # Prefer exact path match decision first
         if expected:
-            if expected.pac_src_md5 and sf.flac_md5 and expected.pac_src_md5 == sf.flac_md5:
-                # Same content; check encoder/quality
+            is_md5_match = bool(expected.pac_src_md5 and sf.flac_md5 and expected.pac_src_md5 == sf.flac_md5)
+
+            # Fallback for no-hash mode: assume match if output is newer than source.
+            is_time_match = not hash_streaminfo and (sf.mtime_ns < expected.mtime_ns)
+
+            if is_md5_match or is_time_match:
+                # Same content (or assumed same); check encoder/quality
                 if expected.pac_encoder == encoder and str(expected.pac_quality) == str(desired_quality):
                     # Consider retagging if PAC_* incomplete or source_rel differs and allowed
                     needs_retag = False
                     if retag_existing:
+                        # With time-based match, we might be missing md5, so retag is good
                         if not expected.pac_version or not expected.pac_source_rel:
                             needs_retag = True
                         elif expected.pac_source_rel != str(sf.rel_path):
                             needs_retag = True
+
+                    reason = "md5+settings match" if is_md5_match else "time+settings match"
+                    action = "retag" if needs_retag and not no_adopt else "skip"
+                    if needs_retag and not no_adopt:
+                        reason += "; retag"
+
                     plan.append(
                         PlanItem(
-                            action="retag" if needs_retag and not no_adopt else "skip",
-                            reason="md5+settings match" + ("; retag" if needs_retag and not no_adopt else ""),
+                            action=action,
+                            reason=reason,
                             src_path=sf.path,
                             rel_path=sf.rel_path,
                             flac_md5=sf.flac_md5,
@@ -134,7 +147,7 @@ def plan_changes(
                         )
                     )
             else:
-                # Expected exists but MD5 unknown or differs.
+                # Expected exists but content differs (or cannot be determined)
                 if not expected.pac_src_md5 and not no_adopt:
                     # Adopt the file: it's at the right path but has no PAC tags.
                     plan.append(

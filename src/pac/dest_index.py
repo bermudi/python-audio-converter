@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Destination index that derives state from output files.
 
 Scans a destination root for .m4a/.mp4/.mp4a and .opus files, reads embedded
@@ -9,7 +11,6 @@ PAC_* tags via `pac.metadata.read_pac_tags()`, and builds two indices:
 This supports the stateless planner by matching sources (by FLAC STREAMINFO MD5)
 with existing outputs and enabling rename/retag/skip decisions without a local DB.
 """
-from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
