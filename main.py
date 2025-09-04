@@ -97,15 +97,11 @@ def cmd_preflight() -> int:
     return EXIT_OK if ok else EXIT_PREFLIGHT_FAILED
 
 
-def cmd_init_db() -> int:
-    logger.warning("init-db is deprecated in stateless mode and does nothing")
-    return EXIT_OK
-
-
 def cmd_convert(
     src: str,
     dest: str,
     tvbr: int,
+    vbr: int,
     *,
     pcm_codec: str,
     verify_tags: bool,
@@ -122,7 +118,7 @@ def cmd_convert(
 
     rc = 1
     if st.has_libfdk_aac:
-        rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=5)
+        rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=vbr)
     else:
         st_qaac = probe_qaac()
         if st_qaac.available:
@@ -130,7 +126,7 @@ def cmd_convert(
         else:
             st_fdk = probe_fdkaac()
             if st_fdk.available:
-                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5, pcm_codec=pcm_codec)
+                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=vbr, pcm_codec=pcm_codec)
             else:
                 logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
                 return EXIT_PREFLIGHT_FAILED
@@ -148,7 +144,7 @@ def cmd_convert(
     # Embed PAC_* tags
     try:
         enc = "libfdk_aac" if st.has_libfdk_aac else ("qaac" if probe_qaac().available else ("fdkaac" if probe_fdkaac().available else "aac"))
-        qual = str(tvbr) if enc == "qaac" else "5"
+        qual = str(tvbr) if enc == "qaac" else str(vbr)
         write_pac_tags_mp4(
             dest_p,
             src_md5="",  # unknown here unless we rescan; planner can rely on later flows
@@ -174,84 +170,6 @@ def cmd_convert(
     return EXIT_OK
 
 
-def _encode_one(
-    src_p: Path,
-    dest_p: Path,
-    tvbr: int,
-    *,
-    pcm_codec: str,
-    verify_tags: bool,
-    verify_strict: bool,
-) -> tuple[int, str]:
-    """Encode a single file using the same backend selection as cmd_convert()."""
-    st = probe_ffmpeg()
-    if not st.available:
-        logger.error("ffmpeg not found; cannot convert")
-        return EXIT_PREFLIGHT_FAILED
-
-    rc = 1
-    if st.has_libfdk_aac:
-        rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=5)
-    else:
-        st_qaac = probe_qaac()
-        if st_qaac.available:
-            rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr, pcm_codec=pcm_codec)
-        else:
-            st_fdk = probe_fdkaac()
-            if st_fdk.available:
-                rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=5, pcm_codec=pcm_codec)
-            else:
-                logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
-                return EXIT_PREFLIGHT_FAILED
-
-    if rc != 0:
-        return rc, "failed"
-
-    # Metadata copy and verification
-    try:
-        copy_tags_flac_to_mp4(src_p, dest_p)
-        logger.bind(action="tags", file=str(src_p.name), status="ok").info("tags copy ok")
-    except Exception as e:
-        reason = f"copy-exception: {e}"
-        logger.bind(action="tags", file=str(src_p.name), status="error", reason=reason).error("tags copy failed")
-        if verify_strict:
-            return 1, "failed"
-        # If not strict, this is a warning. We can't reasonably verify, so we are done with this file.
-        return 0, "warn"  # Return success code, but with a warning status.
-
-    # Embed PAC_* tags
-    try:
-        enc = "libfdk_aac" if probe_ffmpeg().has_libfdk_aac else ("qaac" if probe_qaac().available else ("fdkaac" if probe_fdkaac().available else "aac"))
-        qual = "5" if enc in {"libfdk_aac", "fdkaac"} else str(tvbr)
-        write_pac_tags_mp4(
-            dest_p,
-            src_md5="",
-            encoder=enc,
-            quality=qual,
-            version="0.2",
-            source_rel=src_p.name,
-        )
-    except Exception as e:
-        logger.bind(action="pac_tags", file=str(src_p.name), status="warn", reason=str(e)).warning("PAC_* embed failed")
-
-    ver_status = "skipped"
-    if verify_tags:
-        try:
-            disc = verify_tags_flac_vs_mp4(src_p, dest_p)
-        except Exception as e:
-            disc = [f"verify-exception: {e}"]
-        ver_status = "ok" if not disc else ("failed" if verify_strict else "warn")
-        level = "INFO"
-        if ver_status == "failed":
-            level = "ERROR"
-        elif ver_status == "warn":
-            level = "WARNING"
-        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log(level, "verify complete")
-        if disc and verify_strict:
-            return 1, "failed"
-    return 0, ver_status
-
-
 def _encode_one_selected(
     src_p: Path,
     dest_p: Path,
@@ -264,6 +182,8 @@ def _encode_one_selected(
     pcm_codec: str,
     verify_tags: bool,
     verify_strict: bool,
+    cover_art_resize: bool,
+    cover_art_max_size: int,
 ) -> tuple[int, str]:
     """Encode using the preselected backend to keep DB planning consistent."""
     if codec == "opus":
@@ -289,9 +209,13 @@ def _encode_one_selected(
     # Metadata copy and verification
     try:
         if codec == "opus":
-            copy_tags_flac_to_opus(src_p, dest_p)
+            copy_tags_flac_to_opus(
+                src_p, dest_p, cover_art_resize=cover_art_resize, cover_art_max_size=cover_art_max_size
+            )
         else:
-            copy_tags_flac_to_mp4(src_p, dest_p)
+            copy_tags_flac_to_mp4(
+                src_p, dest_p, cover_art_resize=cover_art_resize, cover_art_max_size=cover_art_max_size
+            )
         logger.bind(action="tags", file=str(src_p.name), status="ok").info("tags copy ok")
     except Exception as e:
         reason = f"copy-exception: {e}"
@@ -356,6 +280,8 @@ def _encode_one_selected_timed(
     pcm_codec: str,
     verify_tags: bool,
     verify_strict: bool,
+    cover_art_resize: bool,
+    cover_art_max_size: int,
 ) -> tuple[int, float, str]:
     """Wrapper that measures wall time for a single encode."""
     t0 = time.time()
@@ -370,6 +296,8 @@ def _encode_one_selected_timed(
         pcm_codec=pcm_codec,
         verify_tags=verify_tags,
         verify_strict=verify_strict,
+        cover_art_resize=cover_art_resize,
+        cover_art_max_size=cover_art_max_size,
     )
     return rc, time.time() - t0, ver_status
 
@@ -395,6 +323,8 @@ def cmd_convert_dir(
     pcm_codec: str = "pcm_s24le",
     verify_tags: bool = False,
     verify_strict: bool = False,
+    cover_art_resize: bool = True,
+    cover_art_max_size: int = 1500,
     stop_event: Optional[threading.Event] = None,
     pause_event: Optional[threading.Event] = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -644,6 +574,8 @@ def cmd_convert_dir(
             pcm_codec=pcm_codec,
             verify_tags=verify_tags,
             verify_strict=verify_strict,
+            cover_art_resize=cover_art_resize,
+            cover_art_max_size=cover_art_max_size,
         )
 
     for pi, res in pool.imap_unordered_bounded(
@@ -795,7 +727,6 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("preflight", help="Check ffmpeg and AAC encoder availability")
-    sub.add_parser("init-db", help="Initialize local state database")
 
     p_convert = sub.add_parser(
         "convert",
@@ -806,8 +737,14 @@ def main(argv: list[str] | None = None) -> int:
     p_convert.add_argument(
         "--tvbr",
         type=int,
-        default=96,
-        help="qaac true VBR value targeting around 256 kbps (default: 96)",
+        default=None,
+        help="qaac true VBR value targeting around 256 kbps (default from settings)",
+    )
+    p_convert.add_argument(
+        "--vbr",
+        type=int,
+        default=None,
+        help="libfdk_aac/fdkaac VBR quality/mode 1..5 (default from settings)",
     )
     p_convert.add_argument(
         "--pcm-codec",
@@ -923,6 +860,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Treat any tag verification discrepancy as a failure",
     )
 
+    # Cover art options
+    cover_art_group = p_dir.add_mutually_exclusive_group()
+    cover_art_group.add_argument(
+        "--cover-art-resize",
+        dest="cover_art_resize",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Enable resizing of cover art images that exceed max dimensions",
+    )
+    cover_art_group.add_argument(
+        "--no-cover-art-resize",
+        dest="cover_art_resize",
+        action="store_const",
+        const=False,
+        help="Disable resizing of cover art images",
+    )
+    p_dir.add_argument(
+        "--cover-art-max-size",
+        type=int,
+        default=None,
+        help="Max dimension (width or height) for cover art (default from settings)",
+    )
+
     args = p.parse_args(argv)
     # Load settings: defaults + TOML + env + CLI overrides
     overrides = cli_overrides_from_args(args)
@@ -938,10 +899,9 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(cfg.log_level, cfg.log_json)
     if args.cmd == "preflight":
         return cmd_preflight()
-    if args.cmd == "init-db":
-        return cmd_init_db()
     if args.cmd == "convert":
         tvbr_eff = args.tvbr if args.tvbr is not None else cfg.tvbr
+        vbr_eff = args.vbr if args.vbr is not None else cfg.vbr
         pcm_eff = args.pcm_codec if getattr(args, "pcm_codec", None) is not None else cfg.pcm_codec
         ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
         ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
@@ -949,6 +909,7 @@ def main(argv: list[str] | None = None) -> int:
             args.src,
             args.dest,
             tvbr_eff,
+            vbr_eff,
             pcm_codec=pcm_eff,
             verify_tags=ver_tags_eff,
             verify_strict=ver_strict_eff,
@@ -970,6 +931,8 @@ def main(argv: list[str] | None = None) -> int:
         retag_existing_eff = bool(getattr(args, "retag_existing", True))
         prune_orphans_eff = bool(getattr(args, "prune_orphans", False))
         no_adopt_eff = bool(getattr(args, "no_adopt", False))
+        cover_art_resize_eff = cfg.cover_art_resize if args.cover_art_resize is None else args.cover_art_resize
+        cover_art_max_size_eff = args.cover_art_max_size if args.cover_art_max_size is not None else cfg.cover_art_max_size
         exit_code, _ = cmd_convert_dir(
             args.in_dir,
             args.out_dir,
@@ -990,6 +953,8 @@ def main(argv: list[str] | None = None) -> int:
             pcm_codec=pcm_eff,
             verify_tags=ver_tags_eff,
             verify_strict=ver_strict_eff,
+            cover_art_resize=cover_art_resize_eff,
+            cover_art_max_size=cover_art_max_size_eff,
         )
         return exit_code
     p.error("unknown command")

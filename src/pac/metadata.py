@@ -11,6 +11,26 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict
 import base64
+from io import BytesIO
+
+
+def _resize_cover_art(img_data: bytes, max_size: int) -> bytes:
+    """Resize image if its larger dimension exceeds max_size."""
+    try:
+        from PIL import Image
+
+        img = Image.open(BytesIO(img_data))
+        if img.width > max_size or img.height > max_size:
+            img.thumbnail((max_size, max_size))
+            out_buffer = BytesIO()
+            # Preserve format, fall back to JPEG
+            img_format = img.format if img.format in ["JPEG", "PNG"] else "JPEG"
+            img.save(out_buffer, format=img_format)
+            return out_buffer.getvalue()
+    except Exception:
+        # If anything fails, return original data
+        return img_data
+    return img_data
 
 
 def _first_front_cover(flac_obj) -> Optional[bytes]:
@@ -89,7 +109,14 @@ def _first_front_cover(flac_obj) -> Optional[bytes]:
     return None
 
 
-def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path, pac: Optional[Dict[str, str]] = None) -> None:
+def copy_tags_flac_to_mp4(
+    src_flac: Path,
+    dst_mp4: Path,
+    pac: Optional[Dict[str, str]] = None,
+    *,
+    cover_art_resize: bool = True,
+    cover_art_max_size: int = 1500,
+) -> None:
     """Copy common tags and cover art from FLAC to MP4/M4A.
 
     This is best-effort and idempotent; missing tags are skipped.
@@ -149,6 +176,8 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path, pac: Optional[Dict[str,
     # Cover art
     img = _first_front_cover(f)
     if img:
+        if cover_art_resize:
+            img = _resize_cover_art(img, cover_art_max_size)
         # Try to guess format by simple magic
         fmt = MP4Cover.FORMAT_JPEG if img[:3] == b"\xff\xd8\xff" else MP4Cover.FORMAT_PNG
         m["covr"] = [MP4Cover(img, imageformat=fmt)]
@@ -178,7 +207,14 @@ def copy_tags_flac_to_mp4(src_flac: Path, dst_mp4: Path, pac: Optional[Dict[str,
     m.save()
 
 
-def copy_tags_flac_to_opus(src_flac: Path, dst_opus: Path, pac: Optional[Dict[str, str]] = None) -> None:
+def copy_tags_flac_to_opus(
+    src_flac: Path,
+    dst_opus: Path,
+    pac: Optional[Dict[str, str]] = None,
+    *,
+    cover_art_resize: bool = True,
+    cover_art_max_size: int = 1500,
+) -> None:
     """Copy all Vorbis comments and cover art from FLAC to Opus."""
     from mutagen.flac import FLAC, Picture
     from mutagen.oggopus import OggOpus
@@ -193,6 +229,8 @@ def copy_tags_flac_to_opus(src_flac: Path, dst_opus: Path, pac: Optional[Dict[st
     # Cover art
     img_data = _first_front_cover(f)
     if img_data:
+        if cover_art_resize:
+            img_data = _resize_cover_art(img_data, cover_art_max_size)
         pic = Picture()
         pic.data = img_data
         # Try to guess format from magic bytes

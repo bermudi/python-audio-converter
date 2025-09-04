@@ -13,6 +13,7 @@ dependencies = [
     "rich>=14.1.0",
     "tqdm>=4.67.1",
     "tomlkit>=0.13.2",
+    "Pillow>=10.4.0",
 ]
 
 [project.scripts]

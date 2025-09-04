@@ -118,6 +118,8 @@ class ConvertWorker(QtCore.QThread):
         verify_strict: bool,
         log_json_path: Optional[str],
         no_adopt: bool,
+        cover_art_resize: bool,
+        cover_art_max_size: int,
     ) -> None:
         super().__init__()
         self.src_dir = src_dir
@@ -138,6 +140,8 @@ class ConvertWorker(QtCore.QThread):
         self.verify_strict = verify_strict
         self.log_json_path = log_json_path
         self.no_adopt = no_adopt
+        self.cover_art_resize = cover_art_resize
+        self.cover_art_max_size = cover_art_max_size
 
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
@@ -174,6 +178,8 @@ class ConvertWorker(QtCore.QThread):
                 verify_tags=self.verify_tags,
                 verify_strict=self.verify_strict,
                 no_adopt=self.no_adopt,
+                cover_art_resize=self.cover_art_resize,
+                cover_art_max_size=self.cover_art_max_size,
                 stop_event=self.stop_event,
                 pause_event=self.pause_event,
             )
@@ -287,11 +293,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_no_adopt = QtWidgets.QCheckBox("Do not adopt legacy files")
         self.chk_no_adopt.setChecked(False)
 
+        self.chk_cover_resize = QtWidgets.QCheckBox("Resize cover art")
+        self.chk_cover_resize.setChecked(self.settings.cover_art_resize)
+        self.spin_cover_max_size = QtWidgets.QSpinBox()
+        self.spin_cover_max_size.setRange(300, 4000)
+        self.spin_cover_max_size.setValue(self.settings.cover_art_max_size)
+        self.spin_cover_max_size.setToolTip("Max dimension for cover art (px)")
+
+
         grid.addWidget(self.chk_rename, 3, 0, 1, 2)
         grid.addWidget(self.chk_retag, 3, 2, 1, 2)
         grid.addWidget(self.chk_prune, 3, 4, 1, 2)
         grid.addWidget(self.chk_force, 4, 0, 1, 2)
         grid.addWidget(self.chk_no_adopt, 4, 2, 1, 2)
+
+        grid.addWidget(self.chk_cover_resize, 5, 0, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Max size:"), 5, 2)
+        grid.addWidget(self.spin_cover_max_size, 5, 3)
+
 
         form.addRow("Settings:", self._wrap_row(grid))
         # Encoder/quality hint labels
@@ -394,8 +413,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preflight_results = res
         if res.get("ok"):
             txt = (
-                f"ffmpeg: {res.get('ffmpeg')}
-"
+                f"ffmpeg: {res.get('ffmpeg')}\n"
                 f"libfdk_aac: {'YES' if res.get('libfdk_aac') else 'NO'} | "
                 f"libopus: {'YES' if res.get('libopus') else 'NO'} | "
                 f"qaac: {res.get('qaac') or 'NO'} | "
@@ -486,6 +504,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "verify_tags": bool(self.chk_verify.isChecked()),
             "verify_strict": bool(self.chk_verify_strict.isChecked()),
             "log_json_path": self.settings.log_json,
+            "cover_art_resize": bool(self.chk_cover_resize.isChecked()),
+            "cover_art_max_size": int(self.spin_cover_max_size.value()),
         }
 
     def _start_convert(self, *, dry_run: bool) -> None:
