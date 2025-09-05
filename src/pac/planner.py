@@ -13,9 +13,10 @@ from typing import Iterable, List, Literal, Optional, Set
 from .scanner import SourceFile
 from .paths import sanitize_rel_path
 from .dest_index import DestIndex, DestEntry
+from .metadata import verify_tags_flac_vs_mp4, verify_tags_flac_vs_opus
 
 
-Action = Literal["convert", "skip", "rename", "retag", "prune"]
+Action = Literal["convert", "skip", "rename", "retag", "prune", "sync_tags"]
 
 
 @dataclass
@@ -48,7 +49,9 @@ def plan_changes(
     retag_existing: bool = True,
     prune_orphans: bool = False,
     no_adopt: bool = False,
-    hash_streaminfo: bool = True,
+    sync_tags: bool = False,
+    out_root: Path,
+    
 ) -> List[PlanItem]:
     """Create a stateless plan.
 
@@ -97,10 +100,7 @@ def plan_changes(
         if expected:
             is_md5_match = bool(expected.pac_src_md5 and sf.flac_md5 and expected.pac_src_md5 == sf.flac_md5)
 
-            # Fallback for no-hash mode: assume match if output is newer than source.
-            is_time_match = not hash_streaminfo and (sf.mtime_ns < expected.mtime_ns)
-
-            if is_md5_match or is_time_match:
+            if is_md5_match:
                 # Same content (or assumed same); check encoder/quality
                 if expected.pac_encoder == encoder and str(expected.pac_quality) == str(desired_quality):
                     # Consider retagging if PAC_* incomplete or source_rel differs and allowed
@@ -112,10 +112,24 @@ def plan_changes(
                         elif expected.pac_source_rel != str(sf.rel_path):
                             needs_retag = True
 
-                    reason = "md5+settings match" if is_md5_match else "time+settings match"
+                    reason = "md5+settings match"
                     action = "retag" if needs_retag and not no_adopt else "skip"
                     if needs_retag and not no_adopt:
                         reason += "; retag"
+
+                    if action == "skip" and sync_tags:
+                        if out_root is None:
+                            raise ValueError("out_root must be provided when sync_tags is True")
+                        dest_path = out_root / expected.rel_path
+                        discrepancies = []
+                        if codec == "opus":
+                            discrepancies = verify_tags_flac_vs_opus(sf.path, dest_path)
+                        else:
+                            discrepancies = verify_tags_flac_vs_mp4(sf.path, dest_path)
+                        
+                        if discrepancies:
+                            action = "sync_tags"
+                            reason = "tags changed"
 
                     plan.append(
                         PlanItem(

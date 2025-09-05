@@ -103,7 +103,7 @@ NFR-7 Scalability of scheduling: The scheduler shall bound in‑flight work item
 
 5.1 Licensing: libfdk_aac availability varies and may be non‑free in some contexts. The app shall not bundle any encoder. It shall rely on system tools: FFmpeg (required), and optionally `qaac`/`fdkaac`. Documentation shall provide install guidance for each.
 
-5.2 Local state: None (v0.2). The filesystem and PAC_* tags are the single source of truth. When STREAMINFO MD5 is unavailable, fallback heuristics may use size+mtime or full SHA256 as configured.
+5.2 Local state: None (v0.2). The filesystem and PAC_* tags are the single source of truth. The FLAC STREAMINFO MD5 is always used for change detection.
 
 5.3 Environment: Python 3.12. System FFmpeg (libfdk_aac preferred). Optional `qaac` and `fdkaac` as fallbacks. GUI via Qt (PySide6) on Linux.
 
@@ -113,7 +113,7 @@ NFR-7 Scalability of scheduling: The scheduler shall bound in‑flight work item
   - Setup: choose Source dir; choose Destination root (local path for staging/export to player).
   - Scan Results: counts of New/Changed/Unchanged, list preview with filters.
   - Convert: live progress table (file, status, bitrate, elapsed), overall progress bar, workers panel, logs pane.
-  - Settings: workers (parallelism), VBR quality (default ~256 kbps target), output template, hashing toggle, logging level, state DB location, advanced FFmpeg args (read‑only by default).
+  - Settings: workers (parallelism), VBR quality (default ~256 kbps target), output template, logging level, state DB location, advanced FFmpeg args (read‑only by default).
 - Behaviors:
   - Pause/Resume; Cancel (graceful stop after current files); Retry failed only.
   - Double‑click a file to view detailed log and tag mapping.

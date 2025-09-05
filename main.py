@@ -311,7 +311,7 @@ def cmd_convert_dir(
     vbr: int,
     opus_vbr_kbps: int,
     workers: int | None,
-    hash_streaminfo: bool,
+    
     verbose: bool,
     dry_run: bool,
     force_reencode: bool,
@@ -319,6 +319,7 @@ def cmd_convert_dir(
     retag_existing: bool,
     prune_orphans: bool,
     no_adopt: bool,
+    sync_tags: bool = False,
     log_json_path: Optional[str] = None,
     pcm_codec: str = "pcm_s24le",
     verify_tags: bool = False,
@@ -369,7 +370,7 @@ def cmd_convert_dir(
     # Scan
     max_workers = workers or (os.cpu_count() or 1)
     t_scan_s = time.time()
-    files = scan_flac_files(src_root, compute_flac_md5=hash_streaminfo, max_workers=max_workers)
+    files = scan_flac_files(src_root, compute_flac_md5=True, max_workers=max_workers)
     d_scan = time.time() - t_scan_s
     if not files:
         logger.info("No .flac files found")
@@ -392,7 +393,8 @@ def cmd_convert_dir(
         retag_existing=retag_existing,
         prune_orphans=prune_orphans,
         no_adopt=no_adopt,
-        hash_streaminfo=hash_streaminfo,
+        sync_tags=sync_tags,
+        out_root=out_root,
     )
     d_plan = time.time() - t_plan_s
 
@@ -401,12 +403,13 @@ def cmd_convert_dir(
     to_rename = [pi for pi in plan if pi.action == "rename"]
     to_retag = [pi for pi in plan if pi.action == "retag"]
     to_prune = [pi for pi in plan if pi.action == "prune"]
+    to_sync_tags = [pi for pi in plan if pi.action == "sync_tags"]
 
     # Always provide basic run info
     quality_str = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
     logger.info(
         f"Codec: {codec} | Selected encoder: {selected_encoder} | Quality: {quality_str}"
-        f" | PCM: {pcm_codec} | Workers: {max_workers} | Hash: {'on' if hash_streaminfo else 'off'}"
+        f" | PCM: {pcm_codec} | Workers: {max_workers}"
         f" | Force: {'on' if force_reencode else 'off'} | Rename: {'on' if allow_rename else 'off'} | Retag: {'on' if retag_existing else 'off'} | Prune: {'on' if prune_orphans else 'off'} | Adopt: {'off' if no_adopt else 'on'}"
     )
     # Show encoder binary path for transparency
@@ -418,7 +421,7 @@ def cmd_convert_dir(
         logger.info(f"Encoder path: fdkaac -> {st_fdk.fdkaac_path}")
     logger.info(f"Source: {src_root} -> Dest: {out_root}")
     logger.info(
-        f"Planned: {len(plan)} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {len(to_rename)} | Retag: {len(to_retag)} | Prune: {len(to_prune)}"
+        f"Planned: {len(plan)} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {len(to_rename)} | Retag: {len(to_retag)} | Prune: {len(to_prune)} | Sync Tags: {len(to_sync_tags)}"
     )
 
     # Concise plan breakdown by change reason
@@ -439,6 +442,8 @@ def cmd_convert_dir(
                 logger.info(f"RETAG    {pi.output_rel} | {pi.reason}")
             elif pi.action == "prune":
                 logger.info(f"PRUNE    {pi.dest_rel} | {pi.reason}")
+            elif pi.action == "sync_tags":
+                logger.info(f"SYNC TAGS {pi.output_rel} | {pi.reason}")
             else:
                 logger.info(f"SKIP     {pi.rel_path} | {pi.reason}")
         plan_summary = {
@@ -448,6 +453,7 @@ def cmd_convert_dir(
             "renamed": len(to_rename),
             "retagged": len(to_retag),
             "pruned": len(to_prune),
+            "to_sync_tags": len(to_sync_tags),
             "converted": 0,
             "failed": 0,
         }
@@ -469,6 +475,7 @@ def cmd_convert_dir(
     renamed = 0
     retagged = 0
     pruned = 0
+    synced_tags = 0
 
     t_encode_s = time.time()
     # Verification counters
@@ -558,6 +565,29 @@ def cmd_convert_dir(
         except Exception as e:
             failed += 1
             logger.error(f"PRUNE  ERR {pi.dest_rel}: {e}")
+
+    for pi in to_sync_tags:
+        try:
+            dp = out_root / (pi.output_rel or Path(""))
+            if codec == "opus" or (dp.suffix.lower() == ".opus"):
+                copy_tags_flac_to_opus(
+                    pi.src_path,
+                    dp,
+                    cover_art_resize=cover_art_resize,
+                    cover_art_max_size=cover_art_max_size,
+                )
+            else:
+                copy_tags_flac_to_mp4(
+                    pi.src_path,
+                    dp,
+                    cover_art_resize=cover_art_resize,
+                    cover_art_max_size=cover_art_max_size,
+                )
+            synced_tags += 1
+            logger.info(f"SYNC TAGS OK  {pi.output_rel}")
+        except Exception as e:
+            failed += 1
+            logger.error(f"SYNC TAGS ERR {pi.output_rel}: {e}")
     # Bounded processing via WorkerPool to keep <= ~2x workers in flight
     bound = max(1, max_workers * 2)
 
@@ -636,7 +666,7 @@ def cmd_convert_dir(
 
     total = len(plan)
     logger.info(
-        f"Planned: {total} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {renamed} | Retag: {retagged} | Prune: {pruned} | Converted: {converted} | Failed: {failed}"
+        f"Planned: {total} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {renamed} | Retag: {retagged} | Prune: {pruned} | Synced Tags: {synced_tags} | Converted: {converted} | Failed: {failed}"
     )
     # Always print concise timing summary
     d_total = time.time() - t_preflight_s
@@ -655,7 +685,7 @@ def cmd_convert_dir(
         "encoder": selected_encoder,
         "quality": quality_for_run,
         "workers": max_workers,
-        "hash": bool(hash_streaminfo),
+        "hash": True,
         "force_reencode": bool(force_reencode),
         "counts": {
             "planned": total,
@@ -664,6 +694,7 @@ def cmd_convert_dir(
             "renamed": renamed,
             "retagged": retagged,
             "pruned": pruned,
+            "synced_tags": synced_tags,
             "converted": converted,
             "failed": failed,
         },
@@ -808,23 +839,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="PCM codec for ffmpeg decode when piping (default from settings)",
     )
-    # Tri-state hash flag: default None, explicit --hash/--no-hash set True/False
-    hash_group = p_dir.add_mutually_exclusive_group()
-    hash_group.add_argument(
-        "--hash",
-        dest="hash_streaminfo",
-        action="store_const",
-        const=True,
-        default=None,
-        help="Compute and store FLAC STREAMINFO MD5 for change detection (slower)",
-    )
-    hash_group.add_argument(
-        "--no-hash",
-        dest="hash_streaminfo",
-        action="store_const",
-        const=False,
-        help="Disable FLAC STREAMINFO MD5 (use size+mtime only)",
-    )
+    
     p_dir.add_argument(
         "--verbose",
         "-v",
@@ -850,6 +865,7 @@ def main(argv: list[str] | None = None) -> int:
     retag_group.add_argument("--no-retag-existing", dest="retag_existing", action="store_const", const=False, help="Do not retag existing outputs")
     p_dir.add_argument("--prune", dest="prune_orphans", action="store_true", help="Delete destination files whose PAC_SRC_MD5 no longer exists in sources")
     p_dir.add_argument("--no-adopt", dest="no_adopt", action="store_true", help="Do not adopt/retag outputs missing PAC_* tags even if content matches")
+    p_dir.add_argument("--sync-tags", dest="sync_tags", action="store_true", help="Sync tags for files with matching audio content but different metadata")
     p_dir.add_argument(
         "--verify-tags",
         action="store_true",
@@ -922,7 +938,7 @@ def main(argv: list[str] | None = None) -> int:
         vbr_eff = args.vbr if args.vbr is not None else cfg.vbr
         opus_vbr_kbps_eff = args.opus_vbr_kbps if args.opus_vbr_kbps is not None else cfg.opus_vbr_kbps
         workers_eff = args.workers if args.workers is not None else (cfg.workers or (os.cpu_count() or 1))
-        hash_eff = cfg.hash_streaminfo if args.hash_streaminfo is None else args.hash_streaminfo
+        
         pcm_eff = args.pcm_codec if getattr(args, "pcm_codec", None) is not None else cfg.pcm_codec
         ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
         ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
@@ -932,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:
         retag_existing_eff = bool(getattr(args, "retag_existing", True))
         prune_orphans_eff = bool(getattr(args, "prune_orphans", False))
         no_adopt_eff = bool(getattr(args, "no_adopt", False))
+        sync_tags_eff = bool(getattr(args, "sync_tags", False))
         cover_art_resize_eff = cfg.cover_art_resize if args.cover_art_resize is None else args.cover_art_resize
         cover_art_max_size_eff = args.cover_art_max_size if args.cover_art_max_size is not None else cfg.cover_art_max_size
         exit_code, _ = cmd_convert_dir(
@@ -942,7 +959,7 @@ def main(argv: list[str] | None = None) -> int:
             vbr=vbr_eff,
             opus_vbr_kbps=opus_vbr_kbps_eff,
             workers=workers_eff,
-            hash_streaminfo=hash_eff,
+            
             verbose=args.verbose,
             dry_run=args.dry_run,
             force_reencode=force_reencode_eff,
@@ -950,6 +967,7 @@ def main(argv: list[str] | None = None) -> int:
             retag_existing=retag_existing_eff,
             prune_orphans=prune_orphans_eff,
             no_adopt=no_adopt_eff,
+            sync_tags=sync_tags_eff,
             log_json_path=cfg.log_json,
             pcm_codec=pcm_eff,
             verify_tags=ver_tags_eff,

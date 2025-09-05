@@ -42,7 +42,7 @@ class PacSettings(BaseSettings):
         description="PCM codec for ffmpeg decode piping (pcm_s24le or pcm_f32le)",
     )
     workers: Optional[int] = Field(default=None, description="Parallel workers; None=auto (CPU cores)")
-    hash_streaminfo: bool = Field(default=False, description="Compute FLAC STREAMINFO MD5 during scan")
+    
     force: bool = Field(default=False, description="Force re-encode regardless of DB state")
     verify_tags: bool = Field(default=False, description="After tag copy, verify a subset of tags were persisted")
     verify_strict: bool = Field(default=False, description="Treat any verification discrepancy as a failure")
@@ -135,7 +135,7 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         "opus_vbr_kbps",
         "pcm_codec",
         "workers",
-        "hash_streaminfo",
+        
         "force",
         "verify_tags",
         "verify_strict",

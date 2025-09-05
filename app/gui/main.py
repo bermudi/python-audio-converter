@@ -107,13 +107,15 @@ class ConvertWorker(QtCore.QThread):
         vbr: int,
         opus_vbr_kbps: int,
         workers: int,
-        hash_streaminfo: bool,
+        
         verbose: bool,
         dry_run: bool,
         force_reencode: bool,
         allow_rename: bool,
         retag_existing: bool,
         prune_orphans: bool,
+        sync_tags: bool,
+        sync_tags: bool,
         verify_tags: bool,
         verify_strict: bool,
         log_json_path: Optional[str],
@@ -129,13 +131,15 @@ class ConvertWorker(QtCore.QThread):
         self.vbr = vbr
         self.opus_vbr_kbps = opus_vbr_kbps
         self.workers = workers
-        self.hash_streaminfo = hash_streaminfo
+        
         self.verbose = verbose
         self.dry_run = dry_run
         self.force_reencode = force_reencode
         self.allow_rename = allow_rename
         self.retag_existing = retag_existing
         self.prune_orphans = prune_orphans
+        self.sync_tags = sync_tags
+        self.sync_tags = sync_tags
         self.verify_tags = verify_tags
         self.verify_strict = verify_strict
         self.log_json_path = log_json_path
@@ -167,13 +171,15 @@ class ConvertWorker(QtCore.QThread):
                 vbr=self.vbr,
                 opus_vbr_kbps=self.opus_vbr_kbps,
                 workers=self.workers,
-                hash_streaminfo=self.hash_streaminfo,
+                
                 verbose=self.verbose,
                 dry_run=self.dry_run,
                 force_reencode=self.force_reencode,
                 allow_rename=self.allow_rename,
                 retag_existing=self.retag_existing,
                 prune_orphans=self.prune_orphans,
+                sync_tags=self.sync_tags,
+                sync_tags=self.sync_tags,
                 log_json_path=self.log_json_path,
                 verify_tags=self.verify_tags,
                 verify_strict=self.verify_strict,
@@ -256,8 +262,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_opus_vbr.setValue(self.settings.opus_vbr_kbps)
         self.spin_opus_vbr.setToolTip("Used for Opus encode (VBR bitrate in kbps)")
 
-        self.chk_hash = QtWidgets.QCheckBox("Compute FLAC STREAMINFO MD5 (slower)")
-        self.chk_hash.setChecked(self.settings.hash_streaminfo)
+        
 
         self.chk_verify = QtWidgets.QCheckBox("Verify tags after encode")
         self.chk_verify.setChecked(self.settings.verify_tags)
@@ -277,7 +282,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(QtWidgets.QLabel("Opus vbr (kbps)"), 1, 4)
         grid.addWidget(self.spin_opus_vbr, 1, 5)
 
-        grid.addWidget(self.chk_hash, 2, 0, 1, 3)
+        
         grid.addWidget(self.chk_verify, 2, 3, 1, 2)
         grid.addWidget(self.chk_verify_strict, 2, 5, 1, 1)
 
@@ -293,6 +298,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_no_adopt = QtWidgets.QCheckBox("Do not adopt legacy files")
         self.chk_no_adopt.setChecked(False)
 
+        self.chk_sync_tags = QtWidgets.QCheckBox("Sync tags")
+        self.chk_sync_tags.setChecked(False)
+
         self.chk_cover_resize = QtWidgets.QCheckBox("Resize cover art")
         self.chk_cover_resize.setChecked(self.settings.cover_art_resize)
         self.spin_cover_max_size = QtWidgets.QSpinBox()
@@ -306,6 +314,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.chk_prune, 3, 4, 1, 2)
         grid.addWidget(self.chk_force, 4, 0, 1, 2)
         grid.addWidget(self.chk_no_adopt, 4, 2, 1, 2)
+        grid.addWidget(self.chk_sync_tags, 4, 4, 1, 2)
 
         grid.addWidget(self.chk_cover_resize, 5, 0, 1, 2)
         grid.addWidget(QtWidgets.QLabel("Max size:"), 5, 2)
@@ -328,11 +337,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_plan_retag = QtWidgets.QLabel("Retag: 0")
         self.lbl_plan_rename = QtWidgets.QLabel("Rename: 0")
         self.lbl_plan_prune = QtWidgets.QLabel("Prune: 0")
+        self.lbl_plan_sync_tags = QtWidgets.QLabel("Sync Tags: 0")
         plan_layout.addWidget(self.lbl_plan_convert)
         plan_layout.addWidget(self.lbl_plan_skip)
         plan_layout.addWidget(self.lbl_plan_retag)
         plan_layout.addWidget(self.lbl_plan_rename)
         plan_layout.addWidget(self.lbl_plan_prune)
+        plan_layout.addWidget(self.lbl_plan_sync_tags)
         self.plan_group.setLayout(plan_layout)
         self.plan_group.hide()  # Initially hidden
         outer.addWidget(self.plan_group)
@@ -493,7 +504,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "vbr": int(self.spin_vbr.value()),
             "opus_vbr_kbps": int(self.spin_opus_vbr.value()),
             "workers": int(self.spin_workers.value()),
-            "hash_streaminfo": bool(self.chk_hash.isChecked()),
+            
             "verbose": True,
             "dry_run": False,
             "force_reencode": bool(self.chk_force.isChecked()),
@@ -501,6 +512,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "retag_existing": bool(self.chk_retag.isChecked()),
             "prune_orphans": bool(self.chk_prune.isChecked()),
             "no_adopt": bool(self.chk_no_adopt.isChecked()),
+            "sync_tags": bool(self.chk_sync_tags.isChecked()),
             "verify_tags": bool(self.chk_verify.isChecked()),
             "verify_strict": bool(self.chk_verify_strict.isChecked()),
             "log_json_path": self.settings.log_json,
@@ -562,6 +574,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_plan_retag.setText(f"Retag: {plan.get('retagged', 0)}")
         self.lbl_plan_rename.setText(f"Rename: {plan.get('renamed', 0)}")
         self.lbl_plan_prune.setText(f"Prune: {plan.get('pruned', 0)}")
+        self.lbl_plan_sync_tags.setText(f"Sync Tags: {plan.get('to_sync_tags', 0)}")
 
     def _on_convert_done(self, code: int) -> None:
         if code == EXIT_OK:

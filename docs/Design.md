@@ -136,7 +136,7 @@ Components:
   - Setup: choose Source and Destination; test FFmpeg.
   - Scan Results: counts, preview list, filters (new/changed/failed previously).
   - Convert: overall progress + table with per-file status, bitrate, elapsed; pause/resume/cancel; retry failed.
-  - Settings: VBR quality, workers, output template, hashing toggle, logging level.
+  - Settings: VBR quality, workers, output template, logging level.
   - Logs/Report: live log pane, export run report (JSON and text).
 - Architecture:
   - MVC-ish: a `JobModel` (QAbstractTableModel) for file rows; a `Controller` to orchestrate scanner/planner/scheduler; `Views` bound to model.
@@ -148,7 +148,7 @@ Components:
   - log_level, log_json
   - tvbr (qaac), vbr (libfdk/fdkaac), workers
   - pcm_codec (pcm_s24le|pcm_f32le|pcm_s16le)
-  - hash_streaminfo, force
+  - force
   - verify_tags, verify_strict
  - Future additions: faststart toggle (currently always enabled), scan_duration, progress default, log rotation/retention
  - Note: Settings are merged from defaults + TOML + env (PAC_*) + CLI overrides; `--write-config` emits the effective TOML.
