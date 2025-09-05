@@ -51,6 +51,19 @@ EXIT_OK = 0
 EXIT_WITH_FILE_ERRORS = 2
 EXIT_PREFLIGHT_FAILED = 3
 
+def _empty_summary() -> dict[str, Any]:
+    return {
+        "planned": 0,
+        "to_convert": 0,
+        "skipped": 0,
+        "renamed": 0,
+        "retagged": 0,
+        "pruned": 0,
+        "synced_tags": 0,
+        "converted": 0,
+        "failed": 0,
+    }
+
 
 def configure_logging(log_level: str = "INFO", log_json_path: Optional[str] = None) -> None:
     """Configure Loguru for human console output and optional JSON lines file.
@@ -341,14 +354,14 @@ def cmd_convert_dir(
     st_fdk = None
     if not st.available:
         logger.error("ffmpeg not found; cannot convert")
-        return EXIT_PREFLIGHT_FAILED
+        return EXIT_PREFLIGHT_FAILED, _empty_summary()
 
     if codec == "opus":
         if st.has_libopus:
             selected_encoder = "libopus"
         else:
             logger.error("Opus encoding requested, but libopus not found in ffmpeg")
-            return EXIT_PREFLIGHT_FAILED
+            return EXIT_PREFLIGHT_FAILED, _empty_summary()
     else:  # aac
         if st.has_libfdk_aac:
             selected_encoder = "libfdk_aac"
@@ -362,7 +375,7 @@ def cmd_convert_dir(
                     selected_encoder = "fdkaac"
                 else:
                     logger.error("No suitable AAC encoder found (need libfdk_aac, qaac, or fdkaac)")
-                    return EXIT_PREFLIGHT_FAILED
+                    return EXIT_PREFLIGHT_FAILED, _empty_summary()
 
     d_preflight = time.time() - t_preflight_s
     quality_for_run = opus_vbr_kbps if codec == "opus" else (tvbr if selected_encoder == "qaac" else vbr)
@@ -374,7 +387,7 @@ def cmd_convert_dir(
     d_scan = time.time() - t_scan_s
     if not files:
         logger.info("No .flac files found")
-        return EXIT_OK
+        return EXIT_OK, _empty_summary()
 
     # Destination index and plan (stateless)
     t_idx_s = time.time()
@@ -512,7 +525,7 @@ def cmd_convert_dir(
             resp = input(prompt)
             if str(resp).strip().lower() not in {"y", "yes"}:
                 logger.warning("Force re-encode cancelled by user")
-                return EXIT_OK
+                return EXIT_OK, _empty_summary()
         except Exception:
             pass
 
