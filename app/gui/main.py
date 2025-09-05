@@ -115,7 +115,6 @@ class ConvertWorker(QtCore.QThread):
         retag_existing: bool,
         prune_orphans: bool,
         sync_tags: bool,
-        sync_tags: bool,
         verify_tags: bool,
         verify_strict: bool,
         log_json_path: Optional[str],
@@ -138,7 +137,6 @@ class ConvertWorker(QtCore.QThread):
         self.allow_rename = allow_rename
         self.retag_existing = retag_existing
         self.prune_orphans = prune_orphans
-        self.sync_tags = sync_tags
         self.sync_tags = sync_tags
         self.verify_tags = verify_tags
         self.verify_strict = verify_strict
@@ -178,7 +176,6 @@ class ConvertWorker(QtCore.QThread):
                 allow_rename=self.allow_rename,
                 retag_existing=self.retag_existing,
                 prune_orphans=self.prune_orphans,
-                sync_tags=self.sync_tags,
                 sync_tags=self.sync_tags,
                 log_json_path=self.log_json_path,
                 verify_tags=self.verify_tags,
