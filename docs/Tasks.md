@@ -120,7 +120,7 @@ The project pivots to a stateless design. We remove the local SQLite DB and use 
 - Accept: Smooth progress; toggled by --progress/--no-progress; compatible with verbose logs.
 - Refs: main.py, pyproject.toml.
 
-[ ] # 9. GUI: progress, cancel/pause, encoder-aware hints
+[x] # 9. GUI: progress, cancel/pause, encoder-aware hints
 - Why: FR‑9; current GUI can run plan/convert but lacks cancel/pause and detailed progress.
 - Scope:
   - Add counts and ETA labels; per-file table later.

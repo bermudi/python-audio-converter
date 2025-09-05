@@ -110,6 +110,10 @@ Commands are implemented in [main.py](main.py).
     - `--retag-existing` / `--no-retag-existing`: Retag existing outputs with missing/old PAC_* tags (default: on)
     - `--prune`: Delete destination files whose source no longer exists
     - `--no-adopt`: Do not adopt/retag outputs missing PAC_* tags even if content matches
+    - `--sync-tags`: Sync tags for files that are otherwise up-to-date.
+    - `--verify-tags` / `--verify-strict`: Check tags after conversion and fail on mismatch (with `--verify-strict`).
+    - `--cover-art-resize` / `--no-cover-art-resize`: Control resizing of large cover art.
+    - `--cover-art-max-size INT`: Set max dimension for cover art (default 1500).
 
 Exit codes:
 - 0: success
@@ -141,4 +145,6 @@ Exit codes:
   - [SRS.md](docs/SRS.md) — requirements
   - [Design.md](docs/Design.md) — architecture and rationale
 - `app/` — GUI application (PySide6)
+- `tests/` — unit/integration tests
+GUI application (PySide6)
 - `tests/` — unit/integration tests
