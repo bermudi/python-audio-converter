@@ -324,7 +324,7 @@ def cmd_convert_dir(
     vbr: int,
     opus_vbr_kbps: int,
     workers: int | None,
-    
+
     verbose: bool,
     dry_run: bool,
     force_reencode: bool,
@@ -341,6 +341,7 @@ def cmd_convert_dir(
     cover_art_max_size: int = 1500,
     stop_event: Optional[threading.Event] = None,
     pause_event: Optional[threading.Event] = None,
+    interactive: bool = True,
 ) -> tuple[int, dict[str, Any]]:
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
@@ -508,7 +509,7 @@ def cmd_convert_dir(
     tag_sync_warn = 0
     tag_sync_failed = 0
 
-    if prune_orphans and to_prune and not dry_run:
+    if interactive and prune_orphans and to_prune and not dry_run:
         try:
             prompt = f"Prune will delete {len(to_prune)} files from the destination. This cannot be undone. Continue? [y/N]: "
             resp = input(prompt)
@@ -519,7 +520,7 @@ def cmd_convert_dir(
             logger.warning("Could not get confirmation; cancelling prune.")
             to_prune = []
 
-    if force_reencode and not dry_run:
+    if interactive and force_reencode and not dry_run:
         try:
             prompt = f"Force re-encode will process {len(to_convert)} files. Continue? [y/N]: "
             resp = input(prompt)

@@ -169,7 +169,7 @@ class ConvertWorker(QtCore.QThread):
                 vbr=self.vbr,
                 opus_vbr_kbps=self.opus_vbr_kbps,
                 workers=self.workers,
-                
+
                 verbose=self.verbose,
                 dry_run=self.dry_run,
                 force_reencode=self.force_reencode,
@@ -185,6 +185,7 @@ class ConvertWorker(QtCore.QThread):
                 cover_art_max_size=self.cover_art_max_size,
                 stop_event=self.stop_event,
                 pause_event=self.pause_event,
+                interactive=False,
             )
             if plan:
                 self.plan_ready.emit(plan)
@@ -531,6 +532,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self,
                 "Confirm Prune",
                 "This will delete files from the destination directory that do not exist in the source. This cannot be undone. Are you sure?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.No:
+                return
+
+        if params.get("force_reencode") and not dry_run:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Confirm Force Re-encode",
+                "This will re-encode all files regardless of existing outputs. Are you sure?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                 QtWidgets.QMessageBox.StandardButton.No,
             )
