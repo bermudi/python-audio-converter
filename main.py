@@ -197,6 +197,7 @@ def _encode_one_selected(
     verify_strict: bool,
     cover_art_resize: bool,
     cover_art_max_size: int,
+    src_md5: str = "",
 ) -> tuple[int, str]:
     """Encode using the preselected backend to keep DB planning consistent."""
     if codec == "opus":
@@ -242,7 +243,7 @@ def _encode_one_selected(
         if codec == "opus":
             write_pac_tags_opus(
                 dest_p,
-                src_md5="",
+                src_md5=src_md5,
                 encoder="libopus",
                 quality=str(opus_vbr_kbps),
                 version="0.2",
@@ -251,7 +252,7 @@ def _encode_one_selected(
         else:
             write_pac_tags_mp4(
                 dest_p,
-                src_md5="",
+                src_md5=src_md5,
                 encoder=encoder,
                 quality=str(tvbr if encoder == "qaac" else vbr),
                 version="0.2",
@@ -295,6 +296,7 @@ def _encode_one_selected_timed(
     verify_strict: bool,
     cover_art_resize: bool,
     cover_art_max_size: int,
+    src_md5: str = "",
 ) -> tuple[int, float, str]:
     """Wrapper that measures wall time for a single encode."""
     t0 = time.time()
@@ -311,6 +313,7 @@ def _encode_one_selected_timed(
         verify_strict=verify_strict,
         cover_art_resize=cover_art_resize,
         cover_art_max_size=cover_art_max_size,
+        src_md5=src_md5,
     )
     return rc, time.time() - t0, ver_status
 
@@ -621,6 +624,7 @@ def cmd_convert_dir(
             verify_strict=verify_strict,
             cover_art_resize=cover_art_resize,
             cover_art_max_size=cover_art_max_size,
+            src_md5=str(getattr(pi, "flac_md5", "") or ""),
         )
 
     for pi, res in pool.imap_unordered_bounded(
@@ -639,28 +643,6 @@ def cmd_convert_dir(
                     ver_warn += 1
                 elif ver_status == "failed":
                     ver_failed += 1
-            # Embed PAC_* tags into outputs to support stateless planning
-            try:
-                if codec == "opus":
-                    write_pac_tags_opus(
-                        dest_path,
-                        src_md5=str(getattr(pi, "flac_md5", "") or ""),
-                        encoder=str(getattr(pi, "encoder", "")) or "libopus",
-                        quality=str(getattr(pi, "vbr_quality", "") or opus_vbr_kbps),
-                        version="0.2",
-                        source_rel=str(getattr(pi, "rel_path", "")),
-                    )
-                else:
-                    write_pac_tags_mp4(
-                        dest_path,
-                        src_md5=str(getattr(pi, "flac_md5", "") or ""),
-                        encoder=str(getattr(pi, "encoder", "")) or ("qaac" if "qaac" in str(getattr(pi, "encoder", "")) else "libfdk_aac"),
-                        quality=str(getattr(pi, "vbr_quality", "")),
-                        version="0.2",
-                        source_rel=str(getattr(pi, "rel_path", "")),
-                    )
-            except Exception as e:
-                logger.bind(action="pac_tags", file=str(pi.rel_path), status="warn", reason=str(e)).warning("PAC_* embed failed")
             # no DB ops in stateless mode
             try:
                 sz = dest_path.stat().st_size
