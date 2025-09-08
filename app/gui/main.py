@@ -19,11 +19,11 @@ if str(ROOT) not in sys.path:
 # Import project modules after adjusting sys.path
 from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
 from pac.config import PacSettings  # noqa: E402
+from pac.logging import setup_console, setup_qt_sink, bind_run
 
 # Reuse CLI core to avoid duplication
 from main import (  # type: ignore # noqa: E402
     cmd_convert_dir,
-    configure_logging,
     EXIT_OK,
     EXIT_PREFLIGHT_FAILED,
     EXIT_WITH_FILE_ERRORS,
@@ -32,34 +32,6 @@ from main import (  # type: ignore # noqa: E402
 
 class LogEmitter(QtCore.QObject):
     message = QtCore.Signal(str)
-
-
-def setup_logger_for_gui(emitter: LogEmitter, level: str = "INFO", json_path: Optional[str] = None) -> None:
-    """Configure Loguru to forward logs to the GUI log panel and optional JSON file.
-
-    This replaces existing sinks to avoid duplicate outputs.
-    """
-    logger.remove()
-    # Human-readable line for the GUI and stderr
-    fmt = "<level>{level: <8}</level> | <green>{time:HH:mm:ss}</green> | <cyan>{message}</cyan>"
-
-    def qt_sink(msg: "loguru.Message") -> None:  # type: ignore[name-defined]
-        try:
-            text = msg.record.get("message", msg)
-            if not isinstance(text, str):
-                text = str(msg)
-            emitter.message.emit(text.rstrip())
-        except Exception:
-            # As a fallback, do nothing to avoid crashing the UI thread
-            pass
-
-    # Send to UI
-    logger.add(qt_sink, level=level.upper(), format=fmt, enqueue=True)
-    # Also keep stderr for convenience
-    logger.add(sys.stderr, level=level.upper(), format=fmt, enqueue=True, backtrace=False, diagnose=False)
-    # Optional JSON lines
-    if json_path:
-        logger.add(json_path, level="DEBUG", serialize=True, enqueue=True)
 
 
 class PreflightWorker(QtCore.QThread):
@@ -389,7 +361,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Logger → UI
         self.log_emitter = LogEmitter()
         self.log_emitter.message.connect(self.append_log)
-        setup_logger_for_gui(self.log_emitter, level=self.settings.log_level, json_path=self.settings.log_json)
+        setup_qt_sink(self.log_emitter, level=self.settings.log_level, json_path=self.settings.log_json)
+        bind_run()
 
     @staticmethod
     def _wrap_row(w: QtWidgets.QLayout | QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -630,7 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
     # Configure a basic console logger early to catch startup
-    configure_logging()
+    setup_console()
     w = MainWindow()
     w.show()
     return app.exec()

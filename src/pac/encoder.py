@@ -48,13 +48,11 @@ def build_ffmpeg_cmd(src: Path, out_tmp: Path, vbr_quality: int = 5) -> List[str
     ]
 
 
-def run_ffmpeg(cmd: List[str]) -> int:
-    """Run FFmpeg and return the exit code."""
+def run_ffmpeg(cmd: List[str]) -> tuple[int, str]:
+    """Run FFmpeg and return the exit code and stderr."""
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if proc.returncode != 0:
-        if proc.stderr:
-            logger.error("ffmpeg stderr:\n{}", proc.stderr)
-    return proc.returncode
+    err = proc.stderr or ""
+    return proc.returncode, err
 
 
 def cmd_to_string(cmd: List[str]) -> str:
@@ -97,36 +95,36 @@ def _temp_out_path(final_path: Path) -> Path:
     return final_path.with_name(final_path.name + suffix)
 
 
-def encode_with_ffmpeg_libfdk(src: Path, dest: Path, *, vbr_quality: int = 5) -> int:
+def encode_with_ffmpeg_libfdk(src: Path, dest: Path, *, vbr_quality: int = 5) -> tuple[int, str]:
     """Encode using ffmpeg/libfdk_aac writing atomically to dest.
 
     Writes to a temporary file in dest's directory then renames to dest on success.
-    Returns 0 on success, non-zero on failure.
+    Returns (0, "") on success, (non-zero, stderr) on failure.
     """
     out_tmp = _temp_out_path(dest)
     cmd = build_ffmpeg_cmd(src, out_tmp, vbr_quality=vbr_quality)
     logger.debug("Running ffmpeg: {}", cmd_to_string(cmd))
-    rc = run_ffmpeg(cmd)
+    rc, err = run_ffmpeg(cmd)
     if rc != 0:
-        # Best-effort cleanup of temp file if created
         try:
             if out_tmp.exists():
                 out_tmp.unlink()
         except Exception:
             pass
-        return rc
+        return rc, err
     # Atomic replace/move
     try:
         os.replace(str(out_tmp), str(dest))
     except Exception as e:
-        logger.error(f"Rename failed: {e}")
+        err_str = f"Rename failed: {e}"
+        logger.error(err_str)
         try:
             if out_tmp.exists():
                 out_tmp.unlink()
         except Exception:
             pass
-        return 1
-    return 0
+        return 1, err_str
+    return 0, ""
 
 
 def build_ffmpeg_opus_cmd(src: Path, out_tmp: Path, vbr_kbps: int = 160) -> List[str]:
@@ -158,30 +156,31 @@ def build_ffmpeg_opus_cmd(src: Path, out_tmp: Path, vbr_kbps: int = 160) -> List
     ]
 
 
-def encode_with_ffmpeg_libopus(src: Path, dest: Path, *, vbr_kbps: int = 160) -> int:
+def encode_with_ffmpeg_libopus(src: Path, dest: Path, *, vbr_kbps: int = 160) -> tuple[int, str]:
     """Encode using ffmpeg/libopus writing atomically to dest."""
     out_tmp = _temp_out_path(dest)
     cmd = build_ffmpeg_opus_cmd(src, out_tmp, vbr_kbps=vbr_kbps)
     logger.debug("Running ffmpeg: {}", cmd_to_string(cmd))
-    rc = run_ffmpeg(cmd)
+    rc, err = run_ffmpeg(cmd)
     if rc != 0:
         try:
             if out_tmp.exists():
                 out_tmp.unlink()
         except Exception:
             pass
-        return rc
+        return rc, err
     try:
         os.replace(str(out_tmp), str(dest))
     except Exception as e:
-        logger.error(f"Rename failed: {e}")
+        err_str = f"Rename failed: {e}"
+        logger.error(err_str)
         try:
             if out_tmp.exists():
                 out_tmp.unlink()
         except Exception:
             pass
-        return 1
-    return 0
+        return 1, err_str
+    return 0, ""
 
 
 def build_qaac_encode_from_stdin_cmd(out_path: Path, tvbr: int = 96, extra_args: Optional[List[str]] = None) -> List[str]:
@@ -204,13 +203,13 @@ def build_qaac_encode_from_stdin_cmd(out_path: Path, tvbr: int = 96, extra_args:
     return cmd
 
 
-def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96, *, pcm_codec: str = "pcm_s24le") -> int:
+def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96, *, pcm_codec: str = "pcm_s24le") -> tuple[int, str]:
     """Run ffmpeg decoding to WAV and pipe into qaac for encoding atomically.
 
     Decodes as 24-bit PCM WAV by default to avoid pre-quantization. Set
     pcm_codec to "pcm_f32le" to pipe floats if preferred.
 
-    Returns 0 on success; non-zero on failure.
+    Returns (0, "") on success; (non-zero, combined_stderr) on failure.
     """
     out_tmp = _temp_out_path(dest)
     ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src, pcm_codec=pcm_codec)
@@ -237,36 +236,31 @@ def run_ffmpeg_pipe_to_qaac(src: Path, dest: Path, tvbr: int = 96, *, pcm_codec:
             p_ff.stdout.close()
         _, err_qc = p_qc.communicate()
         # Ensure ffmpeg exits
-        _, err_ff = p_ff.communicate()
+        err_ff_bytes, _ = p_ff.communicate()
+        err_ff = err_ff_bytes.decode("utf-8", errors="replace") if err_ff_bytes else ""
+
         rc = p_qc.returncode or 0
         if rc != 0:
-            if err_ff:
-                err_ff_txt = (
-                    err_ff.decode("utf-8", errors="replace")
-                    if isinstance(err_ff, (bytes, bytearray))
-                    else err_ff
-                )
-                logger.error("ffmpeg (decode) stderr:\n{}", err_ff_txt)
-            if err_qc:
-                logger.error("qaac stderr:\n{}", err_qc)
+            err = f"qaac:\n{err_qc}\n\nffmpeg:\n{err_ff}"
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
             except Exception:
                 pass
-            return rc
+            return rc, err
         # Atomic replace/move
         try:
             os.replace(str(out_tmp), str(dest))
         except Exception as e:
-            logger.error(f"Rename failed: {e}")
+            err_str = f"Rename failed: {e}"
+            logger.error(err_str)
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
             except Exception:
                 pass
-            return 1
-        return 0
+            return 1, err_str
+        return 0, ""
     finally:
         # Best-effort cleanup of decoder process
         for proc in (p_ff,):
@@ -292,13 +286,13 @@ def build_fdkaac_encode_from_stdin_cmd(out_path: Path, vbr_mode: int = 5, extra_
     return cmd
 
 
-def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5, *, pcm_codec: str = "pcm_s24le") -> int:
+def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5, *, pcm_codec: str = "pcm_s24le") -> tuple[int, str]:
     """Run ffmpeg decoding to WAV and pipe into fdkaac for encoding atomically.
 
     Decodes as 24-bit PCM WAV by default to avoid pre-quantization. Set
     pcm_codec to "pcm_f32le" to pipe floats if preferred.
 
-    Returns 0 on success; non-zero on failure.
+    Returns (0, "") on success; (non-zero, combined_stderr) on failure.
     """
     out_tmp = _temp_out_path(dest)
     ffmpeg_cmd = build_ffmpeg_decode_wav_cmd(src, pcm_codec=pcm_codec)
@@ -323,36 +317,30 @@ def run_ffmpeg_pipe_to_fdkaac(src: Path, dest: Path, vbr_mode: int = 5, *, pcm_c
         if p_ff.stdout is not None:
             p_ff.stdout.close()
         _, err_fd = p_fd.communicate()
-        _, err_ff = p_ff.communicate()
+        err_ff_bytes, _ = p_ff.communicate()
+        err_ff = err_ff_bytes.decode("utf-8", errors="replace") if err_ff_bytes else ""
         rc = p_fd.returncode or 0
         if rc != 0:
-            if err_ff:
-                err_ff_txt = (
-                    err_ff.decode("utf-8", errors="replace")
-                    if isinstance(err_ff, (bytes, bytearray))
-                    else err_ff
-                )
-                logger.error("ffmpeg (decode) stderr:\n{}", err_ff_txt)
-            if err_fd:
-                logger.error("fdkaac stderr:\n{}", err_fd)
+            err = f"fdkaac:\n{err_fd}\n\nffmpeg:\n{err_ff}"
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
             except Exception:
                 pass
-            return rc
+            return rc, err
         # Atomic replace/move
         try:
             os.replace(str(out_tmp), str(dest))
         except Exception as e:
-            logger.error(f"Rename failed: {e}")
+            err_str = f"Rename failed: {e}"
+            logger.error(err_str)
             try:
                 if out_tmp.exists():
                     out_tmp.unlink()
             except Exception:
                 pass
-            return 1
-        return 0
+            return 1, err_str
+        return 0, ""
     finally:
         if p_ff.poll() is None:
             p_ff.kill()

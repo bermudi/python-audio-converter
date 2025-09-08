@@ -46,6 +46,7 @@ from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
 from pac.paths import resolve_collisions, sanitize_rel_path  # noqa: E402
 from pac.dest_index import build_dest_index  # noqa: E402
 from pac.db import PacDB # noqa: E402
+from pac.logging import setup_console, setup_json, bind_run, log_event, truncate # noqa: E402
 
 
 EXIT_OK = 0
@@ -66,48 +67,46 @@ def _empty_summary() -> dict[str, Any]:
     }
 
 
-def configure_logging(log_level: str = "INFO", log_json_path: Optional[str] = None) -> None:
-    """Configure Loguru for human console output and optional JSON lines file.
-
-    log_level: Console log level (e.g., INFO, DEBUG, WARNING).
-    log_json_path: If provided, write structured JSON lines to this path.
-    """
-    logger.remove()
-    # Human console sink
-    logger.add(sys.stderr, level=log_level.upper(), enqueue=True, backtrace=False, diagnose=False)
-    # Optional JSON lines sink
-    if log_json_path:
-        logger.add(log_json_path, level="DEBUG", serialize=True, enqueue=True)
-
-
 def cmd_preflight() -> int:
     st = probe_ffmpeg()
+    log_event(
+        "preflight",
+        level="INFO" if st.available else "ERROR",
+        msg=f"ffmpeg: {'OK' if st.available else 'NOT FOUND'}",
+        check="ffmpeg",
+        available=st.available,
+        path=st.ffmpeg_path,
+        version=st.ffmpeg_version,
+        error=st.error,
+        has_libfdk_aac=st.has_libfdk_aac,
+        has_libopus=st.has_libopus,
+    )
     if not st.available:
-        logger.error("ffmpeg: NOT FOUND")
-        if st.error:
-            logger.error(st.error)
         return EXIT_PREFLIGHT_FAILED
-    logger.info(f"ffmpeg: {st.ffmpeg_path}")
-    logger.info(f"version: {st.ffmpeg_version}")
-    logger.info(f"libfdk_aac (ffmpeg): {'YES' if st.has_libfdk_aac else 'NO'}")
 
     st_fdk = probe_fdkaac()
-    logger.info(f"fdkaac: {'FOUND' if st_fdk.available else 'NOT FOUND'}")
-    if st_fdk.available:
-        logger.info(f"fdkaac path: {st_fdk.fdkaac_path}")
-        if st_fdk.fdkaac_version:
-            logger.info(st_fdk.fdkaac_version)
+    log_event(
+        "preflight",
+        msg=f"fdkaac: {'OK' if st_fdk.available else 'NOT FOUND'}",
+        check="fdkaac",
+        available=st_fdk.available,
+        path=st_fdk.fdkaac_path,
+        version=st_fdk.fdkaac_version,
+    )
 
     st_qaac = probe_qaac(light=False)
-    logger.info(f"qaac: {'FOUND' if st_qaac.available else 'NOT FOUND'}")
-    if st_qaac.available:
-        logger.info(f"qaac path: {st_qaac.qaac_path}")
-        if st_qaac.qaac_version:
-            logger.info(st_qaac.qaac_version)
+    log_event(
+        "preflight",
+        msg=f"qaac: {'OK' if st_qaac.available else 'NOT FOUND'}",
+        check="qaac",
+        available=st_qaac.available,
+        path=st_qaac.qaac_path,
+        version=st_qaac.qaac_version,
+    )
 
     ok = st.available and (st.has_libfdk_aac or st_fdk.available or st_qaac.available)
     if not ok:
-        logger.error("No AAC encoder available. Install ffmpeg with libfdk_aac, or fdkaac, or qaac.")
+        log_event("preflight", level="ERROR", status="error", reason="No AAC encoder available. Install ffmpeg with libfdk_aac, or fdkaac, or qaac.")
     return EXIT_OK if ok else EXIT_PREFLIGHT_FAILED
 
 
@@ -199,27 +198,29 @@ def _encode_one_selected(
     cover_art_resize: bool,
     cover_art_max_size: int,
     src_md5: str = "",
-) -> tuple[int, str]:
+) -> tuple[int, str, str]:
     """Encode using the preselected backend to keep DB planning consistent."""
+    err = ""
     if codec == "opus":
-        rc = encode_with_ffmpeg_libopus(src_p, dest_p, vbr_kbps=opus_vbr_kbps)
+        rc, err = encode_with_ffmpeg_libopus(src_p, dest_p, vbr_kbps=opus_vbr_kbps)
         if rc != 0:
-            return rc, "failed"
+            return rc, "failed", err
     elif encoder == "libfdk_aac":
-        rc = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=vbr)
+        rc, err = encode_with_ffmpeg_libfdk(src_p, dest_p, vbr_quality=vbr)
         if rc != 0:
-            return rc, "failed"
+            return rc, "failed", err
     elif encoder == "qaac":
-        rc = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr, pcm_codec=pcm_codec)
+        rc, err = run_ffmpeg_pipe_to_qaac(src_p, dest_p, tvbr=tvbr, pcm_codec=pcm_codec)
         if rc != 0:
-            return rc, "failed"
+            return rc, "failed", err
     elif encoder == "fdkaac":
-        rc = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=vbr, pcm_codec=pcm_codec)
+        rc, err = run_ffmpeg_pipe_to_fdkaac(src_p, dest_p, vbr_mode=vbr, pcm_codec=pcm_codec)
         if rc != 0:
-            return rc, "failed"
+            return rc, "failed", err
     else:  # pragma: no cover - defensive
-        logger.error(f"Unknown encoder combination: codec={codec}, encoder={encoder}")
-        return 1, "failed"
+        err = f"Unknown encoder combination: codec={codec}, encoder={encoder}"
+        logger.error(err)
+        return 1, "failed", err
 
     # Metadata copy and verification
     try:
@@ -231,13 +232,13 @@ def _encode_one_selected(
             copy_tags_flac_to_mp4(
                 src_p, dest_p, cover_art_resize=cover_art_resize, cover_art_max_size=cover_art_max_size
             )
-        logger.bind(action="tags", file=str(src_p.name), status="ok").info("tags copy ok")
+        log_event("tags", msg="tags copy ok", file=str(src_p.name), status="ok")
     except Exception as e:
         reason = f"copy-exception: {e}"
-        logger.bind(action="tags", file=str(src_p.name), status="error", reason=reason).error("tags copy failed")
+        log_event("tags", level="ERROR", msg="tags copy failed", file=str(src_p.name), status="error", reason=reason)
         if verify_strict:
-            return 1, "failed"
-        return 0, "warn"
+            return 1, "failed", reason
+        return 0, "warn", ""
 
     # Embed PAC_* tags
     try:
@@ -260,7 +261,7 @@ def _encode_one_selected(
                 source_rel=src_p.name,
             )
     except Exception as e:
-        logger.bind(action="pac_tags", file=str(src_p.name), status="warn", reason=str(e)).warning("PAC_* embed failed")
+        log_event("pac_tags", level="WARNING", msg="PAC_* embed failed", file=str(src_p.name), status="warn", reason=str(e))
 
     ver_status = "skipped"
     if verify_tags:
@@ -277,10 +278,17 @@ def _encode_one_selected(
             level = "ERROR"
         elif ver_status == "warn":
             level = "WARNING"
-        logger.bind(action="verify", file=str(src_p), status=ver_status, discrepancies=disc).log(level, "verify complete")
+        log_event(
+            "verify",
+            level=level,
+            msg="verify complete",
+            file=str(src_p),
+            status=ver_status,
+            discrepancies=disc,
+        )
         if disc and verify_strict:
-            return 1, "failed"
-    return 0, ver_status
+            return 1, "failed", "\n".join(disc)
+    return 0, ver_status, ""
 
 
 def _encode_one_selected_timed(
@@ -298,10 +306,10 @@ def _encode_one_selected_timed(
     cover_art_resize: bool,
     cover_art_max_size: int,
     src_md5: str = "",
-) -> tuple[int, float, str]:
+) -> tuple[int, float, str, str]:
     """Wrapper that measures wall time for a single encode."""
     t0 = time.time()
-    rc, ver_status = _encode_one_selected(
+    rc, ver_status, err = _encode_one_selected(
         src_p,
         dest_p,
         codec=codec,
@@ -316,7 +324,7 @@ def _encode_one_selected_timed(
         cover_art_max_size=cover_art_max_size,
         src_md5=src_md5,
     )
-    return rc, time.time() - t0, ver_status
+    return rc, time.time() - t0, ver_status, err
 
 
 def cmd_convert_dir(
@@ -494,13 +502,10 @@ def cmd_convert_dir(
         return EXIT_OK, plan_summary
 
     if verbose:
-        logger.debug(
-            "Preflight: ffmpeg probe = "
-            + f"{d_probe_ff:.3f}s"
-            + (f", qaac probe = {d_probe_qa:.3f}s" if 'd_probe_qa' in locals() else "")
-            + (f", fdkaac probe = {d_probe_fd:.3f}s" if 'd_probe_fd' in locals() else "")
-        )
-        logger.debug(f"Scan: {len(files)} files in {d_scan:.3f}s | Index: {d_db:.3f}s | Plan: {d_plan:.3f}s")
+        log_event("preflight", level="DEBUG", msg=f"preflight checks complete in {d_preflight:.3f}s", duration_ms=int(d_preflight*1000))
+        log_event("scan", level="DEBUG", msg=f"scanned {len(files)} files in {d_scan:.3f}s", file_count=len(files), duration_ms=int(d_scan*1000))
+        log_event("index", level="DEBUG", msg=f"indexed destination in {d_db:.3f}s", duration_ms=int(d_db*1000))
+        log_event("plan", level="DEBUG", msg=f"planned changes in {d_plan:.3f}s", duration_ms=int(d_plan*1000))
 
     pool = WorkerPool(max_workers=max_workers)
 
@@ -522,6 +527,7 @@ def cmd_convert_dir(
     total_bytes = 0
     done = 0
     since_commit = 0  # retained for structure; no DB commits in stateless
+    t_last_report = time.time()
 
     # Optional: sync-tags mode processes unchanged items with tag copy + verify
     tag_sync_processed = 0
@@ -571,10 +577,10 @@ def cmd_convert_dir(
                         f'{{"from": "{pi.dest_rel}"}}',
                     )
                 renamed += 1
-                logger.info(f"RENAME OK  {pi.dest_rel} -> {pi.output_rel}")
+                log_event("rename", status="ok", src=str(pi.dest_rel), dest=str(pi.output_rel))
             except Exception as e:
                 failed += 1
-                logger.error(f"RENAME ERR {pi.dest_rel} -> {pi.output_rel}: {e}")
+                log_event("rename", level="ERROR", status="error", src=str(pi.dest_rel), dest=str(pi.output_rel), reason=str(e))
 
         for pi in to_retag:
             try:
@@ -610,10 +616,10 @@ def cmd_convert_dir(
                         "retag_ok", now_ts, str(pi.flac_md5), str(pi.rel_path), str(pi.output_rel), ""
                     )
                 retagged += 1
-                logger.info(f"RETAG  OK  {pi.output_rel}")
+                log_event("retag", status="ok", file=str(pi.output_rel))
             except Exception as e:
                 failed += 1
-                logger.error(f"RETAG  ERR {pi.output_rel}: {e}")
+                log_event("retag", level="ERROR", status="error", file=str(pi.output_rel), reason=str(e))
 
         for pi in to_prune:
             try:
@@ -625,10 +631,10 @@ def cmd_convert_dir(
                         "prune_ok", now_ts, str(pi.flac_md5), "", str(pi.dest_rel), ""
                     )
                 pruned += 1
-                logger.info(f"PRUNE  OK  {pi.dest_rel}")
+                log_event("prune", status="ok", file=str(pi.dest_rel))
             except Exception as e:
                 failed += 1
-                logger.error(f"PRUNE  ERR {pi.dest_rel}: {e}")
+                log_event("prune", level="ERROR", status="error", file=str(pi.dest_rel), reason=str(e))
         if db:
             db.commit()
     except Exception:
@@ -654,17 +660,17 @@ def cmd_convert_dir(
                     cover_art_max_size=cover_art_max_size,
                 )
             to_sync_tags += 1
-            logger.info(f"SYNC TAGS OK  {pi.output_rel}")
+            log_event("sync_tags", status="ok", file=str(pi.output_rel))
         except Exception as e:
             failed += 1
-            logger.error(f"SYNC TAGS ERR {pi.output_rel}: {e}")
+            log_event("sync_tags", level="ERROR", status="error", file=str(pi.output_rel), reason=str(e))
     # Bounded processing via WorkerPool to keep <= ~2x workers in flight
     bound = max(1, max_workers * 2)
 
     def _task(pi):
         dp = out_root / pi.output_rel
         dp.parent.mkdir(parents=True, exist_ok=True)
-        rc, elapsed_s, ver_status = _encode_one_selected_timed(
+        rc, elapsed_s, ver_status, err = _encode_one_selected_timed(
             pi.src_path,
             dp,
             codec=codec,
@@ -679,14 +685,14 @@ def cmd_convert_dir(
             cover_art_max_size=cover_art_max_size,
             src_md5=str(getattr(pi, "flac_md5", "") or ""),
         )
-        return pi, rc, elapsed_s, ver_status
+        return pi, rc, elapsed_s, ver_status, err
 
     successful_encodes = []
     for pi, res in pool.imap_unordered_bounded(
         _task, to_convert, max_pending=bound, stop_event=stop_event, pause_event=pause_event
     ):
         dest_path = out_root / pi.output_rel
-        _, rc, elapsed_s, ver_status = res
+        _, rc, elapsed_s, ver_status, err = res
         done += 1
         if rc == 0:
             converted += 1
@@ -705,11 +711,48 @@ def cmd_convert_dir(
                 total_bytes += sz
             except Exception:
                 pass
-            logger.bind(action="encode", file=str(pi.rel_path), status="ok", elapsed_ms=int(elapsed_s*1000), bytes_out=int(sz) if 'sz' in locals() else None).info("encode complete")
+            log_event(
+                "encode",
+                msg="encode complete",
+                file=str(pi.rel_path),
+                output_rel=str(pi.output_rel),
+                status="ok",
+                elapsed_ms=int(elapsed_s * 1000),
+                bytes_out=int(sz) if "sz" in locals() else None,
+                codec=codec,
+                encoder=selected_encoder,
+                quality=quality_for_run,
+            )
             logger.info(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}")
+
+            now = time.time()
+            if now - t_last_report > 10.0:
+                t_last_report = now
+                elapsed_time = max(1e-3, now - t_encode_s)
+                rate = converted / elapsed_time
+                log_event(
+                    "encode",
+                    status="progress",
+                    msg=f"progress: {done}/{len(to_convert)}",
+                    done=done,
+                    total=len(to_convert),
+                    converted=converted,
+                    failed=failed,
+                    rate_files_per_s=rate,
+                )
         else:
             failed += 1
-            logger.bind(action="encode", file=str(pi.rel_path), status="error", elapsed_ms=int(elapsed_s*1000)).error("encode failed")
+            reason = truncate(err)
+            log_event(
+                "encode",
+                level="ERROR",
+                msg="encode failed",
+                file=str(pi.rel_path),
+                status="error",
+                elapsed_ms=int(elapsed_s * 1000),
+                reason=reason,
+            )
+            logger.bind(stderr=err).debug("Full encode stderr")
             logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
             # no DB ops in stateless mode
 
@@ -718,7 +761,7 @@ def cmd_convert_dir(
         _task, to_convert, max_pending=bound, stop_event=stop_event, pause_event=pause_event
     ):
         dest_path = out_root / pi.output_rel
-        _, rc, elapsed_s, ver_status = res
+        _, rc, elapsed_s, ver_status, err = res
         done += 1
         if rc == 0:
             converted += 1
@@ -737,11 +780,48 @@ def cmd_convert_dir(
                 total_bytes += sz
             except Exception:
                 pass
-            logger.bind(action="encode", file=str(pi.rel_path), status="ok", elapsed_ms=int(elapsed_s*1000), bytes_out=int(sz) if 'sz' in locals() else None).info("encode complete")
+            log_event(
+                "encode",
+                msg="encode complete",
+                file=str(pi.rel_path),
+                output_rel=str(pi.output_rel),
+                status="ok",
+                elapsed_ms=int(elapsed_s * 1000),
+                bytes_out=int(sz) if "sz" in locals() else None,
+                codec=codec,
+                encoder=selected_encoder,
+                quality=quality_for_run,
+            )
             logger.info(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}")
+
+            now = time.time()
+            if now - t_last_report > 10.0:
+                t_last_report = now
+                elapsed_time = max(1e-3, now - t_encode_s)
+                rate = converted / elapsed_time
+                log_event(
+                    "encode",
+                    status="progress",
+                    msg=f"progress: {done}/{len(to_convert)}",
+                    done=done,
+                    total=len(to_convert),
+                    converted=converted,
+                    failed=failed,
+                    rate_files_per_s=rate,
+                )
         else:
             failed += 1
-            logger.bind(action="encode", file=str(pi.rel_path), status="error", elapsed_ms=int(elapsed_s*1000)).error("encode failed")
+            reason = truncate(err)
+            log_event(
+                "encode",
+                level="ERROR",
+                msg="encode failed",
+                file=str(pi.rel_path),
+                status="error",
+                elapsed_ms=int(elapsed_s * 1000),
+                reason=reason,
+            )
+            logger.bind(stderr=err).debug("Full encode stderr")
             logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
             # no DB ops in stateless mode
 
@@ -1041,7 +1121,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     # Configure logging using effective settings
-    configure_logging(cfg.log_level, cfg.log_json)
+    setup_console(cfg.log_level)
+    if cfg.log_json:
+        setup_json(cfg.log_json)
+    run_id = bind_run()
+    logger.info(f"run_id={run_id}")
     if args.cmd == "preflight":
         return cmd_preflight()
     if args.cmd == "convert":
