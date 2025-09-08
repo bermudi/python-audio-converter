@@ -19,6 +19,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .metadata import read_pac_tags
+from .db import PacDB
 
 
 SUPPORTED_SUFFIXES = {".m4a", ".mp4", ".mp4a", ".opus"}
@@ -103,7 +104,9 @@ def _make_entry(dest_root: Path, abs_path: Path) -> DestEntry:
     )
 
 
-def build_dest_index(dest_root: Path, max_workers: Optional[int] = None) -> DestIndex:
+def build_dest_index(
+    dest_root: Path, max_workers: Optional[int] = None, db: Optional[PacDB] = None, now_ts: int = 0
+) -> DestIndex:
     """Scan destination root and build indices by rel-path and by PAC_SRC_MD5.
 
     - When PAC_* are missing, entries still appear in by_rel but are absent from by_md5.
@@ -133,7 +136,34 @@ def build_dest_index(dest_root: Path, max_workers: Optional[int] = None) -> Dest
     for md5, entries in md5_groups.items():
         md5_groups[md5] = sorted(entries, key=lambda e: e.preferred_key())
 
-    return DestIndex(by_rel=by_rel, by_md5=md5_groups)
+    index = DestIndex(by_rel=by_rel, by_md5=md5_groups)
+
+    if db and index.all_entries():
+        try:
+            db.begin()
+            db.upsert_many_outputs(
+                [
+                    (
+                        e.pac_src_md5,
+                        str(e.rel_path),
+                        e.container,
+                        e.pac_encoder,
+                        e.pac_quality,
+                        e.pac_version,
+                        now_ts,
+                        e.size,
+                        e.mtime_ns,
+                        1 if e.pac_src_md5 else 0,
+                    )
+                    for e in index.all_entries()
+                ]
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    return index
 
 
 __all__ = ["DestEntry", "DestIndex", "build_dest_index"]

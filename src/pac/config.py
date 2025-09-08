@@ -51,6 +51,21 @@ class PacSettings(BaseSettings):
     cover_art_resize: bool = Field(default=True, description="Enable/disable cover art resizing")
     cover_art_max_size: int = Field(default=1500, description="Max dimension (width or height) for cover art")
 
+    # DB History
+    db_path: str = Field(
+        default="~/.local/share/pac/pac.db", description="Path to the history DB file"
+    )
+    db_enable: bool = Field(default=True, description="Enable/disable the history DB")
+    db_prune_grace_days: int = Field(
+        default=14, description="Days to wait before pruning a missing source"
+    )
+    db_auto_adopt_confidence: int = Field(
+        default=70, description="Confidence threshold for auto-adopting a file"
+    )
+    db_auto_rename_confidence: int = Field(
+        default=100, description="Confidence threshold for auto-renaming a file"
+    )
+
     # Config source/path (not persisted as part of effective config when writing)
     config_path: Path = Field(default=DEFAULT_CONFIG_PATH, exclude=True)
 
@@ -135,12 +150,16 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         "opus_vbr_kbps",
         "pcm_codec",
         "workers",
-        
         "force",
         "verify_tags",
         "verify_strict",
         "cover_art_resize",
         "cover_art_max_size",
+        "db_path",
+        "db_enable",
+        "db_prune_grace_days",
+        "db_auto_adopt_confidence",
+        "db_auto_rename_confidence",
     }
     result: Dict[str, Any] = {}
     for k in keys:

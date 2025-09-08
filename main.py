@@ -45,6 +45,7 @@ from pac.planner import plan_changes  # noqa: E402
 from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
 from pac.paths import resolve_collisions, sanitize_rel_path  # noqa: E402
 from pac.dest_index import build_dest_index  # noqa: E402
+from pac.db import PacDB # noqa: E402
 
 
 EXIT_OK = 0
@@ -319,6 +320,7 @@ def _encode_one_selected_timed(
 
 
 def cmd_convert_dir(
+    cfg: PacSettings,
     src_dir: str,
     out_dir: str,
     *,
@@ -349,6 +351,13 @@ def cmd_convert_dir(
     src_root = Path(src_dir).resolve()
     out_root = Path(out_dir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
+
+    # DB init
+    db: Optional[PacDB] = None
+    if cfg.db_enable:
+        db_path = Path(cfg.db_path).expanduser()
+        logger.info(f"Using history DB: {db_path}")
+        db = PacDB(db_path)
 
     # Preflight: detect ffmpeg and choose encoder once for the whole run (stable planning)
     t_preflight_s = time.time()
@@ -387,7 +396,10 @@ def cmd_convert_dir(
     # Scan
     max_workers = workers or (os.cpu_count() or 1)
     t_scan_s = time.time()
-    files = scan_flac_files(src_root, compute_flac_md5=True, max_workers=max_workers)
+    now_ts = int(t_scan_s)
+    files = scan_flac_files(
+        src_root, compute_flac_md5=True, max_workers=max_workers, db=db, now_ts=now_ts
+    )
     d_scan = time.time() - t_scan_s
     if not files:
         logger.info("No .flac files found")
@@ -395,7 +407,7 @@ def cmd_convert_dir(
 
     # Destination index and plan (stateless)
     t_idx_s = time.time()
-    dest_index = build_dest_index(out_root, max_workers=max_workers)
+    dest_index = build_dest_index(out_root, max_workers=max_workers, db=db, now_ts=now_ts)
     d_db = time.time() - t_idx_s
     t_plan_s = time.time()
     plan = plan_changes(
@@ -412,6 +424,11 @@ def cmd_convert_dir(
         no_adopt=no_adopt,
         sync_tags=sync_tags,
         out_root=out_root,
+        db=db,
+        now_ts=now_ts,
+        db_prune_grace_days=cfg.db_prune_grace_days,
+        db_auto_adopt_confidence=cfg.db_auto_adopt_confidence,
+        db_auto_rename_confidence=cfg.db_auto_rename_confidence,
     )
     d_plan = time.time() - t_plan_s
 
@@ -534,54 +551,90 @@ def cmd_convert_dir(
             pass
 
     # Execute filesystem actions first (rename, retag, prune)
-    for pi in to_rename:
-        try:
-            src_p = out_root / (pi.dest_rel or Path(""))
-            dst_p = out_root / (pi.output_rel or Path(""))
-            dst_p.parent.mkdir(parents=True, exist_ok=True)
-            src_p.replace(dst_p)
-            renamed += 1
-            logger.info(f"RENAME OK  {pi.dest_rel} -> {pi.output_rel}")
-        except Exception as e:
-            failed += 1
-            logger.error(f"RENAME ERR {pi.dest_rel} -> {pi.output_rel}: {e}")
+    if db:
+        db.begin()
+    try:
+        for pi in to_rename:
+            try:
+                src_p = out_root / (pi.dest_rel or Path(""))
+                dst_p = out_root / (pi.output_rel or Path(""))
+                dst_p.parent.mkdir(parents=True, exist_ok=True)
+                src_p.replace(dst_p)
+                if db:
+                    db.update_output_dest_rel(str(pi.dest_rel), str(pi.output_rel))
+                    db.add_observation(
+                        "rename_ok",
+                        now_ts,
+                        str(pi.flac_md5),
+                        str(pi.rel_path),
+                        str(pi.output_rel),
+                        f'{{"from": "{pi.dest_rel}"}}',
+                    )
+                renamed += 1
+                logger.info(f"RENAME OK  {pi.dest_rel} -> {pi.output_rel}")
+            except Exception as e:
+                failed += 1
+                logger.error(f"RENAME ERR {pi.dest_rel} -> {pi.output_rel}: {e}")
 
-    for pi in to_retag:
-        try:
-            dp = out_root / (pi.output_rel or Path(""))
-            if codec == "opus" or (dp.suffix.lower() == ".opus"):
-                write_pac_tags_opus(
-                    dp,
-                    src_md5=str(pi.flac_md5 or ""),
-                    encoder="libopus" if codec == "opus" else str(pi.encoder),
-                    quality=str(pi.vbr_quality),
-                    version="0.2",
-                    source_rel=str(pi.rel_path or ""),
-                )
-            else:
-                write_pac_tags_mp4(
-                    dp,
-                    src_md5=str(pi.flac_md5 or ""),
-                    encoder=str(pi.encoder),
-                    quality=str(pi.vbr_quality),
-                    version="0.2",
-                    source_rel=str(pi.rel_path or ""),
-                )
-            retagged += 1
-            logger.info(f"RETAG  OK  {pi.output_rel}")
-        except Exception as e:
-            failed += 1
-            logger.error(f"RETAG  ERR {pi.output_rel}: {e}")
+        for pi in to_retag:
+            try:
+                dp = out_root / (pi.output_rel or Path(""))
+                if codec == "opus" or (dp.suffix.lower() == ".opus"):
+                    write_pac_tags_opus(
+                        dp,
+                        src_md5=str(pi.flac_md5 or ""),
+                        encoder="libopus" if codec == "opus" else str(pi.encoder),
+                        quality=str(pi.vbr_quality),
+                        version="0.2",
+                        source_rel=str(pi.rel_path or ""),
+                    )
+                else:
+                    write_pac_tags_mp4(
+                        dp,
+                        src_md5=str(pi.flac_md5 or ""),
+                        encoder=str(pi.encoder),
+                        quality=str(pi.vbr_quality),
+                        version="0.2",
+                        source_rel=str(pi.rel_path or ""),
+                    )
+                if db:
+                    db.update_output_tags(
+                        str(pi.output_rel),
+                        str(pi.flac_md5 or ""),
+                        str(pi.encoder),
+                        str(pi.vbr_quality),
+                        "0.2",
+                        str(pi.rel_path or ""),
+                    )
+                    db.add_observation(
+                        "retag_ok", now_ts, str(pi.flac_md5), str(pi.rel_path), str(pi.output_rel), ""
+                    )
+                retagged += 1
+                logger.info(f"RETAG  OK  {pi.output_rel}")
+            except Exception as e:
+                failed += 1
+                logger.error(f"RETAG  ERR {pi.output_rel}: {e}")
 
-    for pi in to_prune:
-        try:
-            dp = out_root / (pi.dest_rel or Path(""))
-            dp.unlink(missing_ok=True)
-            pruned += 1
-            logger.info(f"PRUNE  OK  {pi.dest_rel}")
-        except Exception as e:
-            failed += 1
-            logger.error(f"PRUNE  ERR {pi.dest_rel}: {e}")
+        for pi in to_prune:
+            try:
+                dp = out_root / (pi.dest_rel or Path(""))
+                dp.unlink(missing_ok=True)
+                if db:
+                    db.delete_output(str(pi.dest_rel))
+                    db.add_observation(
+                        "prune_ok", now_ts, str(pi.flac_md5), "", str(pi.dest_rel), ""
+                    )
+                pruned += 1
+                logger.info(f"PRUNE  OK  {pi.dest_rel}")
+            except Exception as e:
+                failed += 1
+                logger.error(f"PRUNE  ERR {pi.dest_rel}: {e}")
+        if db:
+            db.commit()
+    except Exception:
+        if db:
+            db.rollback()
+        raise
 
     for pi in to_sync_tags:
         try:
@@ -611,7 +664,7 @@ def cmd_convert_dir(
     def _task(pi):
         dp = out_root / pi.output_rel
         dp.parent.mkdir(parents=True, exist_ok=True)
-        return _encode_one_selected_timed(
+        rc, elapsed_s, ver_status = _encode_one_selected_timed(
             pi.src_path,
             dp,
             codec=codec,
@@ -626,15 +679,18 @@ def cmd_convert_dir(
             cover_art_max_size=cover_art_max_size,
             src_md5=str(getattr(pi, "flac_md5", "") or ""),
         )
+        return pi, rc, elapsed_s, ver_status
 
+    successful_encodes = []
     for pi, res in pool.imap_unordered_bounded(
         _task, to_convert, max_pending=bound, stop_event=stop_event, pause_event=pause_event
     ):
         dest_path = out_root / pi.output_rel
-        rc, elapsed_s, ver_status = res
+        _, rc, elapsed_s, ver_status = res
         done += 1
         if rc == 0:
             converted += 1
+            successful_encodes.append(pi)
             if verify_tags:
                 ver_checked += 1
                 if ver_status == "ok":
@@ -659,6 +715,43 @@ def cmd_convert_dir(
 
     pool.shutdown()
     d_encode = time.time() - t_encode_s
+
+    if db and successful_encodes:
+        try:
+            db.begin()
+            batch_size = 100
+            for i in range(0, len(successful_encodes), batch_size):
+                batch = successful_encodes[i:i+batch_size]
+                db.upsert_many_outputs(
+                    [
+                        (
+                            str(pi.flac_md5 or ""),
+                            str(pi.output_rel),
+                            pi.codec,
+                            pi.encoder,
+                            str(pi.vbr_quality),
+                            "0.2",
+                            now_ts,
+                            (out_root / pi.output_rel).stat().st_size,
+                            (out_root / pi.output_rel).stat().st_mtime_ns,
+                            1,
+                        )
+                        for pi in batch
+                    ]
+                )
+                for pi in batch:
+                    db.add_observation(
+                        "encode_ok",
+                        now_ts,
+                        str(pi.flac_md5),
+                        str(pi.rel_path),
+                        str(pi.output_rel),
+                        f'{{"elapsed_ms": {int(elapsed_s*1000)}}}',
+                    )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.error(f"DB update failed after encoding: {e}")
 
     total = len(plan)
     logger.info(
@@ -897,6 +990,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Max dimension (width or height) for cover art (default from settings)",
     )
 
+    # DB options
+    db_group = p_dir.add_argument_group("db", "Database history options")
+    db_group.add_argument("--db-path", default=None, help="Path to history DB (default from settings)")
+    db_group.add_argument("--no-db", dest="db_enable", action="store_false", default=True, help="Disable history DB for this run")
+    db_group.add_argument("--db-prune-grace-days", type=int, default=None, help="Days to wait before pruning missing source (default from settings)")
+    db_group.add_argument("--db-rename-threshold", type=int, default=None, help="Confidence threshold for auto-rename (default from settings)")
+    db_group.add_argument("--db-adopt-threshold", type=int, default=None, help="Confidence threshold for auto-adopt (default from settings)")
+
     args = p.parse_args(argv)
     # Load settings: defaults + TOML + env + CLI overrides
     overrides = cli_overrides_from_args(args)
@@ -948,6 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
         cover_art_resize_eff = cfg.cover_art_resize if args.cover_art_resize is None else args.cover_art_resize
         cover_art_max_size_eff = args.cover_art_max_size if args.cover_art_max_size is not None else cfg.cover_art_max_size
         exit_code, _ = cmd_convert_dir(
+            cfg, # first arg is now config
             args.in_dir,
             args.out_dir,
             codec=codec_eff,

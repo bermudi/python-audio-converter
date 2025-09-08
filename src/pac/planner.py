@@ -14,6 +14,7 @@ from .scanner import SourceFile
 from .paths import sanitize_rel_path
 from .dest_index import DestIndex, DestEntry
 from .metadata import verify_tags_flac_vs_mp4, verify_tags_flac_vs_opus
+from .db import PacDB
 
 
 Action = Literal["convert", "skip", "rename", "retag", "prune", "sync_tags"]
@@ -51,7 +52,11 @@ def plan_changes(
     no_adopt: bool = False,
     sync_tags: bool = False,
     out_root: Path,
-    
+    db: Optional[PacDB] = None,
+    now_ts: int = 0,
+    db_prune_grace_days: int = 14,
+    db_auto_adopt_confidence: int = 70,
+    db_auto_rename_confidence: int = 100,
 ) -> List[PlanItem]:
     """Create a stateless plan.
 
@@ -164,20 +169,41 @@ def plan_changes(
                 # Expected exists but content differs (or cannot be determined)
                 if not expected.pac_src_md5 and not no_adopt:
                     # Adopt the file: it's at the right path but has no PAC tags.
-                    plan.append(
-                        PlanItem(
-                            action="retag",
-                            reason="adopt: missing PAC tags",
-                            src_path=sf.path,
-                            rel_path=sf.rel_path,
-                            flac_md5=sf.flac_md5,
-                            output_rel=out_rel,
-                            codec=codec,
-                            encoder=encoder,
-                            vbr_quality=desired_quality,
-                            dest_rel=expected.rel_path,
+                    # Let's check the DB to see if we know the md5 for this dest_rel
+                    db_match = None
+                    if db:
+                        db_match = db.lookup_output_by_dest_rel(str(out_rel))
+
+                    if db_match and db_match["md5"] == sf.flac_md5:
+                        plan.append(
+                            PlanItem(
+                                action="retag",
+                                reason="db: adopt missing PAC using md5 linkage",
+                                src_path=sf.path,
+                                rel_path=sf.rel_path,
+                                flac_md5=sf.flac_md5,
+                                output_rel=out_rel,
+                                codec=codec,
+                                encoder=encoder,
+                                vbr_quality=desired_quality,
+                                dest_rel=expected.rel_path,
+                            )
                         )
-                    )
+                    else:
+                        plan.append(
+                            PlanItem(
+                                action="retag",
+                                reason="adopt: missing PAC tags",
+                                src_path=sf.path,
+                                rel_path=sf.rel_path,
+                                flac_md5=sf.flac_md5,
+                                output_rel=out_rel,
+                                codec=codec,
+                                encoder=encoder,
+                                vbr_quality=desired_quality,
+                                dest_rel=expected.rel_path,
+                            )
+                        )
                 else:
                     # Convert because MD5 mismatches, or we are not allowed to adopt.
                     reason = "MD5 mismatch" if expected.pac_src_md5 else "adopt disabled for file with no PAC"
@@ -215,6 +241,25 @@ def plan_changes(
             )
             continue
 
+        if db and sf.flac_md5 and allow_rename:
+            cand = db.lookup_preferred_output_by_md5(sf.flac_md5)
+            if cand and cand["dest_rel"] != str(out_rel):
+                plan.append(
+                    PlanItem(
+                        action="rename",
+                        reason="db: md5 match at different path",
+                        src_path=sf.path,
+                        rel_path=sf.rel_path,
+                        flac_md5=sf.flac_md5,
+                        output_rel=out_rel,
+                        codec=codec,
+                        encoder=encoder,
+                        vbr_quality=desired_quality,
+                        dest_rel=Path(cand["dest_rel"]),
+                    )
+                )
+                continue
+
         # Adopt: output present at expected path but lacking PAC_* (covered earlier). If no expected, we convert.
         # Default path: need to encode
         plan.append(
@@ -233,11 +278,17 @@ def plan_changes(
 
     # Optional prune: destination entries whose PAC_SRC_MD5 not present in sources
     if prune_orphans:
+        grace_seconds = db_prune_grace_days * 86400
         for entry in dest.all_entries():
             md5 = entry.pac_src_md5
             if not md5:
                 continue  # don't prune unknown provenance automatically
             if md5 not in src_md5s:
+                if db:
+                    last_seen_ts = db.get_source_file_last_seen_ts(md5)
+                    if last_seen_ts and (now_ts - last_seen_ts) < grace_seconds:
+                        continue  # skip pruning, it is within the grace period
+
                 plan.append(
                     PlanItem(
                         action="prune",

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Iterable, Iterator, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from pac.db import PacDB
+
 
 @dataclass
 class SourceFile:
@@ -17,7 +19,13 @@ class SourceFile:
     flac_md5: Optional[str] = None  # STREAMINFO MD5, not a full-file hash
 
 
-def scan_flac_files(src_root: Path, compute_flac_md5: bool = True, max_workers: Optional[int] = None) -> List[SourceFile]:
+def scan_flac_files(
+    src_root: Path,
+    compute_flac_md5: bool = True,
+    max_workers: Optional[int] = None,
+    db: Optional[PacDB] = None,
+    now_ts: int = 0,
+) -> List[SourceFile]:
     src_root = src_root.resolve()
     results: List[SourceFile] = []
 
@@ -63,6 +71,29 @@ def scan_flac_files(src_root: Path, compute_flac_md5: bool = True, max_workers: 
             except Exception:
                 # Log error or handle as needed
                 continue
+
+    if db and results:
+        try:
+            db.begin()
+            db.upsert_many_source_files(
+                [
+                    (
+                        str(sf.flac_md5),
+                        now_ts,
+                        sf.size,
+                        sf.mtime_ns,
+                        str(sf.rel_path),
+                        now_ts,
+                    )
+                    for sf in results
+                    if sf.flac_md5
+                ]
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
     return results
 
 
