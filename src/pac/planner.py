@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable, List, Literal, Optional, Set
 
 from .scanner import SourceFile
-from .paths import sanitize_rel_path
+from .paths import sanitize_rel_path, resolve_collisions
 from .dest_index import DestIndex, DestEntry
 from .metadata import verify_tags_flac_vs_mp4, verify_tags_flac_vs_opus
 from .db import PacDB
@@ -303,5 +303,13 @@ def plan_changes(
                         dest_rel=entry.rel_path,
                     )
                 )
+
+    # Resolve output path collisions for any actions that create new files
+    convert_rename_items = [p for p in plan if p.action in ("convert", "rename")]
+    if convert_rename_items:
+        original_paths = [p.output_rel for p in convert_rename_items if p.output_rel]
+        resolved_paths = resolve_collisions(original_paths, out_root=out_root)
+        for item, resolved_path in zip(convert_rename_items, resolved_paths):
+            item.output_rel = resolved_path
 
     return plan

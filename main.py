@@ -509,7 +509,7 @@ def cmd_convert_dir(
     renamed = 0
     retagged = 0
     pruned = 0
-    synced_tags = 0
+    to_sync_tags = 0
 
     t_encode_s = time.time()
     # Verification counters
@@ -653,7 +653,7 @@ def cmd_convert_dir(
                     cover_art_resize=cover_art_resize,
                     cover_art_max_size=cover_art_max_size,
                 )
-            synced_tags += 1
+            to_sync_tags += 1
             logger.info(f"SYNC TAGS OK  {pi.output_rel}")
         except Exception as e:
             failed += 1
@@ -713,6 +713,38 @@ def cmd_convert_dir(
             logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
             # no DB ops in stateless mode
 
+    successful_encodes = []
+    for pi, res in pool.imap_unordered_bounded(
+        _task, to_convert, max_pending=bound, stop_event=stop_event, pause_event=pause_event
+    ):
+        dest_path = out_root / pi.output_rel
+        _, rc, elapsed_s, ver_status = res
+        done += 1
+        if rc == 0:
+            converted += 1
+            successful_encodes.append((pi, elapsed_s))
+            if verify_tags:
+                ver_checked += 1
+                if ver_status == "ok":
+                    ver_ok += 1
+                elif ver_status == "warn":
+                    ver_warn += 1
+                elif ver_status == "failed":
+                    ver_failed += 1
+            # no DB ops in stateless mode
+            try:
+                sz = dest_path.stat().st_size
+                total_bytes += sz
+            except Exception:
+                pass
+            logger.bind(action="encode", file=str(pi.rel_path), status="ok", elapsed_ms=int(elapsed_s*1000), bytes_out=int(sz) if 'sz' in locals() else None).info("encode complete")
+            logger.info(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}")
+        else:
+            failed += 1
+            logger.bind(action="encode", file=str(pi.rel_path), status="error", elapsed_ms=int(elapsed_s*1000)).error("encode failed")
+            logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
+            # no DB ops in stateless mode
+
     pool.shutdown()
     d_encode = time.time() - t_encode_s
 
@@ -727,26 +759,25 @@ def cmd_convert_dir(
                         (
                             str(pi.flac_md5 or ""),
                             str(pi.output_rel),
-                            pi.codec,
+                            "mp4" if pi.codec == "aac" else "opus",
                             pi.encoder,
                             str(pi.vbr_quality),
                             "0.2",
                             now_ts,
                             (out_root / pi.output_rel).stat().st_size,
                             (out_root / pi.output_rel).stat().st_mtime_ns,
-                            1,
                         )
-                        for pi in batch
+                        for pi, elapsed_s in batch
                     ]
                 )
-                for pi in batch:
+                for pi, elapsed_s in batch:
                     db.add_observation(
                         "encode_ok",
                         now_ts,
                         str(pi.flac_md5),
                         str(pi.rel_path),
                         str(pi.output_rel),
-                        f'{{"elapsed_ms": {int(elapsed_s*1000)}}}',
+                        f'{"elapsed_ms": {int(elapsed_s*1000)}}',
                     )
             db.commit()
         except Exception as e:
@@ -755,7 +786,7 @@ def cmd_convert_dir(
 
     total = len(plan)
     logger.info(
-        f"Planned: {total} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {renamed} | Retag: {retagged} | Prune: {pruned} | Synced Tags: {synced_tags} | Converted: {converted} | Failed: {failed}"
+        f"Planned: {total} | Convert: {len(to_convert)} | Skip: {len(unchanged)} | Rename: {renamed} | Retag: {retagged} | Prune: {pruned} | Sync Tags: {to_sync_tags} | Converted: {converted} | Failed: {failed}"
     )
     # Always print concise timing summary
     d_total = time.time() - t_preflight_s
@@ -783,7 +814,7 @@ def cmd_convert_dir(
             "renamed": renamed,
             "retagged": retagged,
             "pruned": pruned,
-            "synced_tags": synced_tags,
+            "synced_tags": to_sync_tags,
             "converted": converted,
             "failed": failed,
         },

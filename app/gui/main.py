@@ -100,6 +100,7 @@ class ConvertWorker(QtCore.QThread):
     def __init__(
         self,
         *,
+        cfg: PacSettings,
         src_dir: Path,
         out_dir: Path,
         codec: str,
@@ -123,6 +124,7 @@ class ConvertWorker(QtCore.QThread):
         cover_art_max_size: int,
     ) -> None:
         super().__init__()
+        self.cfg = cfg
         self.src_dir = src_dir
         self.out_dir = out_dir
         self.codec = codec
@@ -162,6 +164,7 @@ class ConvertWorker(QtCore.QThread):
         try:
             # The new cmd_convert_dir will return a tuple (exit_code, plan_summary)
             code, plan = cmd_convert_dir(
+                self.cfg,
                 str(self.src_dir),
                 str(self.out_dir),
                 codec=self.codec,
@@ -561,7 +564,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.show()
 
         params["dry_run"] = dry_run
-        self.worker = ConvertWorker(**params)
+        self.worker = ConvertWorker(cfg=self.settings, **params)
         self.worker.plan_ready.connect(self._on_plan_ready)
         self.worker.finished_with_code.connect(self._on_convert_done)
         self.worker.finished.connect(self._reenable_ui)
