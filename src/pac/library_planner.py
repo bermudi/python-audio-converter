@@ -107,14 +107,60 @@ def plan_library_actions(
                 params={"target_level": cfg.flac_target_compression, "current_level": current_level}
             ))
 
-        # Phase 5: Artwork extraction (stub)
-        plan.append(LibraryPlanItem(
-            action="extract_art",
-            reason="Extract embedded artwork",
-            src_path=src_path,
-            rel_path=rel_path,
-            flac_md5=md5,
-            params={}
-        ))
+        # Phase 5: Artwork extraction
+        # Check if we have embedded artwork and if extracted copy needs updating
+        from .flac_tools import _resolve_art_pattern
+        from .metadata import _first_front_cover
+        from mutagen.flac import FLAC
+        import os
+
+        art_needed = False
+        potential_art_path = None
+        try:
+            flac_obj = FLAC(str(src_path))
+            if flac_obj and _first_front_cover(flac_obj):
+                # We have embedded artwork, check if extracted copy exists/needs update
+                art_root = Path(cfg.flac_art_root).expanduser()
+                art_pattern = cfg.flac_art_pattern
+                potential_art_path = _resolve_art_pattern(art_pattern, flac_obj, art_root)
+                if potential_art_path:
+                    # Check DB for existing entry
+                    if db:
+                        row = db.conn.execute("SELECT last_export_ts, size FROM art_exports WHERE md5 = ?", (md5,)).fetchone()
+                        if not row:
+                            # No DB entry, need to extract
+                            art_needed = True
+                        else:
+                            # Check if file exists and is up to date
+                            if potential_art_path.exists():
+                                current_mtime = potential_art_path.stat().st_mtime
+                                if current_mtime <= row["last_export_ts"]:
+                                    # File exists and is not newer than last export, skip
+                                    pass
+                                else:
+                                    # File might be changed, re-extract
+                                    art_needed = True
+                            else:
+                                # File missing, need to extract
+                                art_needed = True
+                    else:
+                        # No DB, check if file exists
+                        if not potential_art_path.exists():
+                            art_needed = True
+                else:
+                    # Could not determine art path, skip
+                    pass
+        except Exception as e:
+            logger.debug(f"Error checking artwork for {src_path}: {e}")
+
+        if art_needed:
+            plan.append(LibraryPlanItem(
+                action="extract_art",
+                reason="Extract embedded artwork to structured folders",
+                src_path=src_path,
+                rel_path=rel_path,
+                flac_md5=md5,
+                params={"art_path": str(potential_art_path) if potential_art_path else None}
+            ))
 
     return plan

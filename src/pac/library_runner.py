@@ -15,7 +15,7 @@ from .scheduler import WorkerPool
 from .library_planner import plan_library_actions, LibraryPlanItem
 from .flac_tools import flac_test, recompress_flac, resample_to_cd_flac, extract_art, generate_spectrogram
 from .scanner import scan_flac_files
-# from .convert_dir import cmd_convert_dir  # TODO: Import the existing convert-dir function
+from .convert_dir import cmd_convert_dir  # Import the existing convert-dir function
 
 
 def cmd_manage_library(
@@ -82,59 +82,83 @@ def cmd_manage_library(
 
     # Execute phases
     logger.info("Executing FLAC library maintenance...")
+    timing = {}
 
-    # Phase pools
-    analysis_pool = WorkerPool(cfg.flac_analysis_workers or (cfg.workers or 4))
-    encode_pool = WorkerPool(cfg.flac_workers or (cfg.workers or 2))
-    art_pool = WorkerPool(cfg.flac_art_workers or min(cfg.workers or 4, 4))
+    # Phase 1: Integrity tests
+    if "test_integrity" in actions_by_type:
+        logger.info("Phase 1: Integrity checks")
+        start_time = time.time()
+        integrity_results = _execute_integrity_phase(actions_by_type["test_integrity"], analysis_pool, db, now_ts, cfg, stop_event, pause_event)
+        timing["integrity"] = time.time() - start_time
+        # Update summary with integrity results
+        summary["integrity_ok"] = sum(1 for r in integrity_results if r[1])
+        summary["integrity_failed"] = sum(1 for r in integrity_results if not r[1])
 
-    stop_event = threading.Event()
-    pause_event = threading.Event()
-    pause_event.set()  # Not paused
+    # Phase 3: Resampling
+    if "resample_to_cd" in actions_by_type:
+        logger.info("Phase 3: Resampling to CD quality")
+        start_time = time.time()
+        _execute_resample_phase(actions_by_type["resample_to_cd"], encode_pool, db, now_ts, cfg, stop_event, pause_event)
+        timing["resample"] = time.time() - start_time
 
-    try:
-        # Phase 1: Integrity tests
-        if "test_integrity" in actions_by_type:
-            logger.info("Phase 1: Integrity checks")
-            integrity_results = _execute_integrity_phase(actions_by_type["test_integrity"], analysis_pool, db, now_ts, cfg, stop_event, pause_event)
-            # Update summary with integrity results
-            summary["integrity_ok"] = sum(1 for r in integrity_results if r[1])
-            summary["integrity_failed"] = sum(1 for r in integrity_results if not r[1])
+    # Phase 4: Recompression
+    if "recompress" in actions_by_type:
+        logger.info("Phase 4: Recompression")
+        start_time = time.time()
+        _execute_recompress_phase(actions_by_type["recompress"], encode_pool, db, now_ts, cfg, stop_event, pause_event)
+        timing["recompress"] = time.time() - start_time
 
+    # Phase 5: Artwork extraction
+    if "extract_art" in actions_by_type:
+        logger.info("Phase 5: Artwork extraction")
+        start_time = time.time()
+        _execute_art_phase(actions_by_type["extract_art"], art_pool, db, now_ts, cfg, stop_event, pause_event)
+        timing["artwork"] = time.time() - start_time
 
-        # Phase 3: Resampling
-        if "resample_to_cd" in actions_by_type:
-            logger.info("Phase 3: Resampling to CD quality")
-            _execute_resample_phase(actions_by_type["resample_to_cd"], encode_pool, db, now_ts, cfg, stop_event, pause_event)
-
-        # Phase 4: Recompression
-        if "recompress" in actions_by_type:
-            logger.info("Phase 4: Recompression")
-            _execute_recompress_phase(actions_by_type["recompress"], encode_pool, db, now_ts, cfg, stop_event, pause_event)
-
-        # Phase 5: Artwork extraction
-        if "extract_art" in actions_by_type:
-            logger.info("Phase 5: Artwork extraction")
-            _execute_art_phase(actions_by_type["extract_art"], art_pool, db, now_ts, cfg, stop_event, pause_event)
-
-    finally:
-        analysis_pool.shutdown()
-        encode_pool.shutdown()
-        art_pool.shutdown()
+    # Add timing to summary
+    summary["timing_s"] = timing
+    summary["total_time_s"] = sum(timing.values())
 
     # Optional mirror update
     if mirror_out and cfg.lossy_mirror_auto:
         logger.info(f"Phase 6: Updating lossy mirror to {mirror_out}")
-        # TODO: Implement mirror functionality
-        logger.warning("Mirror functionality not yet implemented")
+        start_time = time.time()
+
+        # Filter sources to only include clean (non-held) files
+        clean_sources = []
+        held_md5s = set()
+
+        # Collect MD5s of held files
+        for item in plan:
+            if item.action == "hold":
+                held_md5s.add(item.flac_md5)
+
+        # Filter sources to only include clean files
+        for src in sources:
+            if src.flac_md5 not in held_md5s:
+                clean_sources.append(src)
+
+        if clean_sources:
+            logger.info(f"Found {len(clean_sources)} clean sources for mirror update")
+            # For now, implement a simple approach by calling the main convert-dir logic
+            # This is a placeholder - the full implementation would require extracting
+            # the convert-dir logic from main.py into a reusable function
+            logger.info("Mirror update: Would process clean sources (implementation pending)")
+            timing["mirror"] = time.time() - start_time
+            summary["mirror"] = {"clean_sources": len(clean_sources), "status": "pending_implementation"}
+        else:
+            logger.info("No clean sources found for mirror update")
+            timing["mirror"] = time.time() - start_time
+            summary["mirror"] = {"clean_sources": 0, "status": "no_clean_sources"}
 
     logger.info("FLAC library maintenance complete")
     return 0, summary
 
 
 def _execute_integrity_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB, now_ts: int, cfg: PacSettings, stop_event, pause_event) -> List[Tuple[LibraryPlanItem, bool]]:
-    """Execute integrity testing phase."""
+    """Execute integrity testing phase with parallel execution."""
     results = []
+    max_pending = min(len(items), pool._max_workers * 4)  # 4x workers for bounded window
 
     def task(item: LibraryPlanItem):
         success, error_msg = flac_test(item.src_path)
@@ -157,14 +181,10 @@ def _execute_integrity_phase(items: List[LibraryPlanItem], pool: WorkerPool, db:
             db.commit()
         return item, success
 
-    # For now, execute sequentially
-    for item in items:
-        if stop_event.is_set():
-            break
-        pause_event.wait()
-        result = task(item)
-        results.append(result)
-        success = result[1]
+    for item, (result_item, success) in pool.imap_unordered_bounded(
+        task, items, max_pending, stop_event=stop_event, pause_event=pause_event
+    ):
+        results.append((result_item, success))
         logger.info(f"Integrity test {'OK' if success else 'FAILED'}: {item.rel_path}")
 
         # Early stop on error if configured
@@ -178,21 +198,24 @@ def _execute_integrity_phase(items: List[LibraryPlanItem], pool: WorkerPool, db:
 
 
 def _execute_resample_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB, now_ts: int, cfg: PacSettings, stop_event, pause_event):
-    """Execute resampling phase."""
-    for item in items:
-        if stop_event.is_set():
-            break
-        pause_event.wait()
+    """Execute resampling phase with parallel execution."""
+    max_pending = min(len(items), pool._max_workers * 4)  # 4x workers for bounded window
+
+    def task(item: LibraryPlanItem):
         rc = resample_to_cd_flac(item.src_path, cfg.flac_target_compression, verify=True)
+        return item, rc
+
+    for item, (result_item, rc) in pool.imap_unordered_bounded(
+        task, items, max_pending, stop_event=stop_event, pause_event=pause_event
+    ):
         logger.info(f"Resample {'OK' if rc == 0 else 'FAILED'}: {item.rel_path}")
 
 
 def _execute_recompress_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB, now_ts: int, cfg: PacSettings, stop_event, pause_event):
-    """Execute recompression phase."""
-    for item in items:
-        if stop_event.is_set():
-            break
-        pause_event.wait()
+    """Execute recompression phase with parallel execution."""
+    max_pending = min(len(items), pool._max_workers * 4)  # 4x workers for bounded window
+
+    def task(item: LibraryPlanItem):
         rc = recompress_flac(item.src_path, cfg.flac_target_compression, verify=True)
         if rc == 0:
             # Update compression tag
@@ -207,23 +230,34 @@ def _execute_recompress_phase(items: List[LibraryPlanItem], pool: WorkerPool, db
                     VALUES (?, ?, ?, ?)
                 """, (item.flac_md5, cfg.flac_target_compression, now_ts, tag_value))
                 db.commit()
+        return item, rc
+
+    for item, (result_item, rc) in pool.imap_unordered_bounded(
+        task, items, max_pending, stop_event=stop_event, pause_event=pause_event
+    ):
         logger.info(f"Recompress {'OK' if rc == 0 else 'FAILED'}: {item.rel_path}")
 
 
 def _execute_art_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB, now_ts: int, cfg: PacSettings, stop_event, pause_event):
-    """Execute artwork extraction phase."""
+    """Execute artwork extraction phase with parallel execution."""
     art_root = Path(cfg.flac_art_root).expanduser()
-    for item in items:
-        if stop_event.is_set():
-            break
-        pause_event.wait()
+    max_pending = min(len(items), pool._max_workers * 4)  # 4x workers for bounded window
+
+    def task(item: LibraryPlanItem):
         art_path = extract_art(item.src_path, art_root, cfg.flac_art_pattern)
         if art_path and db:
+            db.begin()
             db.conn.execute("""
                 INSERT OR REPLACE INTO art_exports
                 (md5, path, last_export_ts, mime, size)
                 VALUES (?, ?, ?, ?, ?)
             """, (item.flac_md5, str(art_path), now_ts, "image/jpeg", art_path.stat().st_size if art_path.exists() else 0))
+            db.commit()
+        return item, art_path
+
+    for item, (result_item, art_path) in pool.imap_unordered_bounded(
+        task, items, max_pending, stop_event=stop_event, pause_event=pause_event
+    ):
         logger.info(f"Artwork {'OK' if art_path else 'SKIP'}: {item.rel_path}")
 
 
