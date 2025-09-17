@@ -83,6 +83,48 @@ class PacDB:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_outputs_dest_rel ON outputs(dest_rel);")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_outputs_md5 ON outputs(md5);")
 
+            # FLAC library management tables
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS flac_checks (
+                    md5 TEXT PRIMARY KEY,
+                    last_test_ts INTEGER,
+                    test_ok INTEGER,
+                    test_msg TEXT,
+                    streaminfo_md5 TEXT,
+                    bit_depth INTEGER,
+                    sample_rate INTEGER,
+                    channels INTEGER
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS flac_policy (
+                    md5 TEXT PRIMARY KEY,
+                    compression_level INTEGER,
+                    last_compress_ts INTEGER,
+                    compression_tag TEXT
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS authenticity (
+                    md5 TEXT PRIMARY KEY,
+                    aucdtect_score REAL,
+                    aucdtect_class TEXT,
+                    lac_result TEXT,
+                    analyzed_ts INTEGER,
+                    status TEXT CHECK(status IN ('ok','suspect','error')),
+                    spectrogram_path TEXT
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS art_exports (
+                    md5 TEXT PRIMARY KEY,
+                    path TEXT,
+                    last_export_ts INTEGER,
+                    mime TEXT,
+                    size INTEGER
+                )
+            """)
+
     def begin(self):
         self.conn.execute("BEGIN;")
 

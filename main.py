@@ -46,6 +46,7 @@ from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
 from pac.paths import resolve_collisions, sanitize_rel_path  # noqa: E402
 from pac.dest_index import build_dest_index  # noqa: E402
 from pac.db import PacDB # noqa: E402
+from pac.library_runner import cmd_manage_library  # noqa: E402
 
 
 EXIT_OK = 0
@@ -880,6 +881,24 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("preflight", help="Check ffmpeg and AAC encoder availability")
 
+    p_library = sub.add_parser("library", help="Manage FLAC library: integrity, compression, authenticity, artwork")
+    p_library.add_argument("--root", required=True, help="FLAC library root directory")
+    p_library.add_argument("--target-compression", type=int, default=None, help="Target FLAC compression level (0-8)")
+    p_library.add_argument("--resample-to-cd", choices=["on", "off"], default=None, help="Resample hi-res to CD quality")
+    p_library.add_argument("--auth", choices=["on", "off"], default=None, help="Enable authenticity analysis")
+    p_library.add_argument("--auth-skip-highbit", choices=["on", "off"], default=None, help="Skip auth for >16-bit files")
+    p_library.add_argument("--auth-skip-lossy-mastered", choices=["on", "off"], default=None, help="Skip auth for lossy-mastered files")
+    p_library.add_argument("--spectrogram", choices=["on", "off"], default=None, help="Generate spectrograms for suspect files")
+    p_library.add_argument("--art-root", default=None, help="Root directory for extracted artwork")
+    p_library.add_argument("--art-pattern", default=None, help="Pattern for artwork paths")
+    p_library.add_argument("--flac-workers", type=int, default=None, help="Workers for FLAC encoding/resampling")
+    p_library.add_argument("--analysis-workers", type=int, default=None, help="Workers for analysis")
+    p_library.add_argument("--art-workers", type=int, default=None, help="Workers for artwork extraction")
+    p_library.add_argument("--stop-on", choices=["never", "suspect", "error"], default=None, help="Stop processing on issues")
+    p_library.add_argument("--dry-run", action="store_true", help="Show plan without executing")
+    p_library.add_argument("--mirror-out", default=None, help="Auto-run convert-dir to this directory for lossy mirror")
+    p_library.add_argument("--mirror-codec", choices=["opus", "aac"], default=None, help="Codec for auto-mirror")
+
     p_convert = sub.add_parser(
         "convert",
         help="Convert a single source file to M4A (tvbr by default)",
@@ -1066,7 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
         vbr_eff = args.vbr if args.vbr is not None else cfg.vbr
         opus_vbr_kbps_eff = args.opus_vbr_kbps if args.opus_vbr_kbps is not None else cfg.opus_vbr_kbps
         workers_eff = args.workers if args.workers is not None else (cfg.workers or (os.cpu_count() or 1))
-        
+
         pcm_eff = args.pcm_codec if getattr(args, "pcm_codec", None) is not None else cfg.pcm_codec
         ver_tags_eff = bool(args.verify_tags) or bool(cfg.verify_tags)
         ver_strict_eff = bool(args.verify_strict) or bool(cfg.verify_strict)
@@ -1088,7 +1107,7 @@ def main(argv: list[str] | None = None) -> int:
             vbr=vbr_eff,
             opus_vbr_kbps=opus_vbr_kbps_eff,
             workers=workers_eff,
-            
+
             verbose=args.verbose,
             dry_run=args.dry_run,
             force_reencode=force_reencode_eff,
@@ -1103,6 +1122,49 @@ def main(argv: list[str] | None = None) -> int:
             verify_strict=ver_strict_eff,
             cover_art_resize=cover_art_resize_eff,
             cover_art_max_size=cover_art_max_size_eff,
+        )
+        return exit_code
+    if args.cmd == "library":
+        # Override config with CLI args
+        library_overrides = {}
+        if args.target_compression is not None:
+            library_overrides["flac_target_compression"] = args.target_compression
+        if args.resample_to_cd is not None:
+            library_overrides["flac_resample_to_cd"] = args.resample_to_cd == "on"
+        if args.auth is not None:
+            library_overrides["flac_auth_enabled"] = args.auth == "on"
+        if args.auth_skip_highbit is not None:
+            library_overrides["flac_auth_skip_highbit"] = args.auth_skip_highbit == "on"
+        if args.auth_skip_lossy_mastered is not None:
+            library_overrides["flac_auth_skip_lossy_mastered"] = args.auth_skip_lossy_mastered == "on"
+        if args.spectrogram is not None:
+            library_overrides["spectrogram_enabled"] = args.spectrogram == "on"
+        if args.art_root is not None:
+            library_overrides["flac_art_root"] = args.art_root
+        if args.art_pattern is not None:
+            library_overrides["flac_art_pattern"] = args.art_pattern
+        if args.flac_workers is not None:
+            library_overrides["flac_workers"] = args.flac_workers
+        if args.analysis_workers is not None:
+            library_overrides["flac_analysis_workers"] = args.analysis_workers
+        if args.art_workers is not None:
+            library_overrides["flac_art_workers"] = args.art_workers
+        if args.stop_on is not None:
+            library_overrides["flac_stop_on"] = args.stop_on
+        if args.mirror_codec is not None:
+            library_overrides["lossy_mirror_codec"] = args.mirror_codec
+
+        # Apply overrides
+        if library_overrides:
+            cfg_overridden = cfg.model_copy(update=library_overrides)
+        else:
+            cfg_overridden = cfg
+
+        exit_code, summary = cmd_manage_library(
+            cfg_overridden,
+            args.root,
+            mirror_out=args.mirror_out,
+            dry_run=args.dry_run,
         )
         return exit_code
     p.error("unknown command")

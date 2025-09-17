@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, Iterator, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from pac.db import PacDB
+from .db import PacDB
 
 
 @dataclass

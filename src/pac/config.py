@@ -66,6 +66,24 @@ class PacSettings(BaseSettings):
         default=100, description="Confidence threshold for auto-renaming a file"
     )
 
+    # FLAC Library management
+    flac_target_compression: int = Field(default=8, description="Target FLAC compression level (0-8)")
+    flac_resample_to_cd: bool = Field(default=True, description="Resample hi-res FLAC to CD quality (44.1kHz, 16-bit, 2ch)")
+    flac_stop_on: Literal["never","suspect","error"] = Field(default="error", description="Stop processing on suspect/error/never")
+    flac_auth_enabled: bool = Field(default=True, description="Enable authenticity analysis")
+    flac_auth_skip_highbit: bool = Field(default=True, description="Skip auth for >16-bit files")
+    flac_auth_skip_lossy_mastered: bool = Field(default=True, description="Skip auth for lossy-mastered files")
+    flac_art_root: str = Field(default="~/Music/_art", description="Root directory for extracted artwork")
+    flac_art_pattern: str = Field(default="{albumartist}/{album}/front.jpg", description="Pattern for artwork paths")
+    flac_workers: Optional[int] = Field(default=None, description="Workers for FLAC encoding/resampling")
+    flac_analysis_workers: Optional[int] = Field(default=None, description="Workers for analysis (auth, integrity)")
+    flac_art_workers: Optional[int] = Field(default=None, description="Workers for artwork extraction")
+    spectrogram_enabled: bool = Field(default=False, description="Generate spectrograms for suspect files")
+    spectrogram_resolution: str = Field(default="1280x720", description="Spectrogram resolution (WxH)")
+    spectrogram_color: str = Field(default="rainbow", description="Spectrogram color scheme")
+    lossy_mirror_auto: bool = Field(default=False, description="Auto-run lossy mirror after FLAC maintenance")
+    lossy_mirror_codec: Literal["opus","aac"] = Field(default="opus", description="Codec for auto-mirror")
+
     # Config source/path (not persisted as part of effective config when writing)
     config_path: Path = Field(default=DEFAULT_CONFIG_PATH, exclude=True)
 
@@ -160,6 +178,23 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         "db_prune_grace_days",
         "db_auto_adopt_confidence",
         "db_auto_rename_confidence",
+        # FLAC settings
+        "flac_target_compression",
+        "flac_resample_to_cd",
+        "flac_stop_on",
+        "flac_auth_enabled",
+        "flac_auth_skip_highbit",
+        "flac_auth_skip_lossy_mastered",
+        "flac_art_root",
+        "flac_art_pattern",
+        "flac_workers",
+        "flac_analysis_workers",
+        "flac_art_workers",
+        "spectrogram_enabled",
+        "spectrogram_resolution",
+        "spectrogram_color",
+        "lossy_mirror_auto",
+        "lossy_mirror_codec",
     }
     result: Dict[str, Any] = {}
     for k in keys:
