@@ -10,6 +10,8 @@ import os
 import shutil
 
 from loguru import logger
+import re
+from string import Formatter
 
 
 class FlacProbeResult:
@@ -207,11 +209,90 @@ def get_flac_tag(src: Path, key: str) -> Optional[str]:
         return None
 
 
+def _resolve_art_pattern(pattern: str, flac_obj, art_root: Path) -> Path:
+    """Resolve pattern placeholders with FLAC tag values."""
+    # Extract field names from pattern
+    field_names = set()
+    formatter = Formatter()
+    try:
+        for literal_text, field_name, format_spec, conversion in formatter.parse(pattern):
+            if field_name:
+                field_names.add(field_name)
+    except ValueError:
+        # If pattern is malformed, treat as literal
+        return art_root / pattern
+
+    # Build substitution dict from FLAC tags
+    substitutions = {}
+    for field in field_names:
+        # Try common variations of field names
+        candidates = [field, field.lower(), field.upper()]
+        if field == 'albumartist':
+            candidates.extend(['artist', 'performer'])
+
+        value = None
+        for candidate in candidates:
+            if candidate in flac_obj.tags:
+                tag_values = flac_obj.tags[candidate]
+                if tag_values:
+                    value = str(tag_values[0]).strip()
+                    break
+
+        # Sanitize filename
+        if value:
+            # Replace problematic characters
+            value = re.sub(r'[<>:"/\\|?*]', '_', value)
+            # Limit length
+            value = value[:100]
+        else:
+            value = 'Unknown'
+
+        substitutions[field] = value
+
+    # Apply substitutions
+    try:
+        resolved = pattern.format(**substitutions)
+    except (KeyError, ValueError):
+        # If substitution fails, use pattern as-is
+        resolved = pattern
+
+    return art_root / resolved
+
+
 def extract_art(src: Path, art_root: Path, pattern: str) -> Optional[Path]:
     """Extract front cover artwork to structured path."""
-    # This is a stub - full implementation in M4
-    logger.info(f"Artwork extraction stub: {src} -> {art_root}/{pattern}")
-    return None
+    try:
+        from mutagen.flac import FLAC
+        from ..metadata import _first_front_cover
+
+        # Load FLAC file
+        flac_obj = FLAC(str(src))
+        if not flac_obj:
+            logger.warning(f"Could not load FLAC file: {src}")
+            return None
+
+        # Get front cover image data
+        img_data = _first_front_cover(flac_obj)
+        if not img_data:
+            logger.debug(f"No front cover found in {src}")
+            return None
+
+        # Parse pattern and substitute tags
+        output_path = _resolve_art_pattern(pattern, flac_obj, art_root)
+
+        # Create parent directories
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write image data
+        with open(output_path, 'wb') as f:
+            f.write(img_data)
+
+        logger.info(f"Extracted artwork: {src} -> {output_path}")
+        return output_path
+
+    except Exception as e:
+        logger.error(f"Failed to extract artwork from {src}: {e}")
+        return None
 
 
 def generate_spectrogram(src: Path, png_path: Path) -> bool:
