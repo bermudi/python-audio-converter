@@ -890,7 +890,7 @@ def main(argv: list[str] | None = None) -> int:
     p_library.add_argument("--flac-workers", type=int, default=None, help="Workers for FLAC encoding/resampling")
     p_library.add_argument("--analysis-workers", type=int, default=None, help="Workers for analysis")
     p_library.add_argument("--art-workers", type=int, default=None, help="Workers for artwork extraction")
-    p_library.add_argument("--stop-on", choices=["never", "suspect", "error"], default=None, help="Stop processing on issues")
+    p_library.add_argument("--generate-spectrograms", action="store_true", help="Generate spectrogram visualizations")
     p_library.add_argument("--dry-run", action="store_true", help="Show plan without executing")
     p_library.add_argument("--mirror-out", default=None, help="Auto-run convert-dir to this directory for lossy mirror")
     p_library.add_argument("--mirror-codec", choices=["opus", "aac"], default=None, help="Codec for auto-mirror")

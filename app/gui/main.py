@@ -19,15 +19,7 @@ if str(ROOT) not in sys.path:
 # Import project modules after adjusting sys.path
 from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
 from pac.config import PacSettings  # noqa: E402
-
-# Reuse CLI core to avoid duplication
-from main import (  # type: ignore # noqa: E402
-    cmd_convert_dir,
-    configure_logging,
-    EXIT_OK,
-    EXIT_PREFLIGHT_FAILED,
-    EXIT_WITH_FILE_ERRORS,
-)
+from pac.library_runner import cmd_manage_library  # noqa: E402
 
 
 class LogEmitter(QtCore.QObject):
@@ -197,6 +189,52 @@ class ConvertWorker(QtCore.QThread):
         self.finished_with_code.emit(code)
 
 
+class LibraryWorker(QtCore.QThread):
+    finished_with_code = QtCore.Signal(int)
+    summary_ready = QtCore.Signal(dict)
+
+    def __init__(
+        self,
+        cfg: PacSettings,
+        root: str,
+        *,
+        mirror_out: Optional[str] = None,
+        dry_run: bool = False,
+        **kwargs
+    ) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.root = root
+        self.mirror_out = mirror_out
+        self.dry_run = dry_run
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # Not paused initially
+
+    def cancel(self) -> None:
+        self.stop_event.set()
+
+    def toggle_pause(self) -> None:
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+        else:
+            self.pause_event.set()
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            exit_code, summary = cmd_manage_library(
+                self.cfg,
+                self.root,
+                mirror_out=self.mirror_out,
+                dry_run=self.dry_run,
+            )
+            self.summary_ready.emit(summary)
+            self.finished_with_code.emit(exit_code)
+        except Exception as e:
+            logger.error(f"Library operation failed: {e}")
+            self.finished_with_code.emit(1)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -208,18 +246,46 @@ class MainWindow(QtWidgets.QMainWindow):
         # Encoder selected by preflight: one of None, "libfdk_aac", "qaac", "fdkaac"
         self.selected_encoder: Optional[str] = None
 
-        # Central layout
+        # Central layout with tabs
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         outer = QtWidgets.QVBoxLayout(central)
 
-        # Preflight row
-        pf_row = QtWidgets.QHBoxLayout()
-        self.btn_preflight = QtWidgets.QPushButton("Preflight")
-        self.lbl_preflight = QtWidgets.QLabel("Not checked")
-        pf_row.addWidget(self.btn_preflight)
-        pf_row.addWidget(self.lbl_preflight, 1)
-        outer.addLayout(pf_row)
+        # Create tab widget
+        self.tabs = QtWidgets.QTabWidget()
+        outer.addWidget(self.tabs, 1)
+
+        # Convert tab
+        self.convert_tab = QtWidgets.QWidget()
+        self.tabs.addTab(self.convert_tab, "Convert")
+        self._setup_convert_tab()
+
+        # Library tab
+        self.library_tab = QtWidgets.QWidget()
+        self.tabs.addTab(self.library_tab, "Library")
+        self._setup_library_tab()
+
+        # Shared components
+        self._setup_shared_components(outer)
+
+        # Connections
+        self.btn_preflight.clicked.connect(self.on_preflight)
+        self.btn_src.clicked.connect(lambda: self._pick_dir(self.edit_src))
+        self.btn_dest.clicked.connect(lambda: self._pick_dir(self.edit_dest))
+        self.btn_plan.clicked.connect(self.on_plan)
+        self.btn_convert.clicked.connect(self.on_convert)
+        self.btn_cancel.clicked.connect(self.on_cancel)
+        self.btn_pause.clicked.connect(self.on_pause_resume)
+        self.combo_codec.currentTextChanged.connect(self._on_codec_change)
+
+        # Logger → UI
+        self.log_emitter = LogEmitter()
+        self.log_emitter.message.connect(self.append_log)
+        setup_logger_for_gui(self.log_emitter, level=self.settings.log_level, json_path=self.settings.log_json)
+
+    def _setup_convert_tab(self) -> None:
+        """Setup the convert tab with existing functionality."""
+        layout = QtWidgets.QVBoxLayout(self.convert_tab)
 
         # I/O selectors
         form = QtWidgets.QFormLayout()
@@ -263,8 +329,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_opus_vbr.setValue(self.settings.opus_vbr_kbps)
         self.spin_opus_vbr.setToolTip("Used for Opus encode (VBR bitrate in kbps)")
 
-        
-
         self.chk_verify = QtWidgets.QCheckBox("Verify tags after encode")
         self.chk_verify.setChecked(self.settings.verify_tags)
         self.chk_verify_strict = QtWidgets.QCheckBox("Strict verification (fail on mismatch)")
@@ -283,22 +347,20 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(QtWidgets.QLabel("Opus vbr (kbps)"), 1, 4)
         grid.addWidget(self.spin_opus_vbr, 1, 5)
 
-        
         grid.addWidget(self.chk_verify, 2, 3, 1, 2)
         grid.addWidget(self.chk_verify_strict, 2, 5, 1, 1)
 
         # New stateless planner flags
         self.chk_rename = QtWidgets.QCheckBox("Rename moved files")
-        self.chk_rename.setChecked(True)  # Default on
+        self.chk_rename.setChecked(True)
         self.chk_retag = QtWidgets.QCheckBox("Retag existing files")
-        self.chk_retag.setChecked(True)  # Default on
+        self.chk_retag.setChecked(True)
         self.chk_prune = QtWidgets.QCheckBox("Prune orphans (deletes files)")
-        self.chk_prune.setChecked(False)  # Default off
+        self.chk_prune.setChecked(False)
         self.chk_force = QtWidgets.QCheckBox("Force re-encode all")
         self.chk_force.setChecked(False)
         self.chk_no_adopt = QtWidgets.QCheckBox("Do not adopt legacy files")
         self.chk_no_adopt.setChecked(False)
-
         self.chk_sync_tags = QtWidgets.QCheckBox("Sync tags")
         self.chk_sync_tags.setChecked(False)
 
@@ -308,7 +370,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_cover_max_size.setRange(300, 4000)
         self.spin_cover_max_size.setValue(self.settings.cover_art_max_size)
         self.spin_cover_max_size.setToolTip("Max dimension for cover art (px)")
-
 
         grid.addWidget(self.chk_rename, 3, 0, 1, 2)
         grid.addWidget(self.chk_retag, 3, 2, 1, 2)
@@ -321,14 +382,14 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(QtWidgets.QLabel("Max size:"), 5, 2)
         grid.addWidget(self.spin_cover_max_size, 5, 3)
 
-
         form.addRow("Settings:", self._wrap_row(grid))
+
         # Encoder/quality hint labels
         self.lbl_encoder_status = QtWidgets.QLabel("Encoder: unknown")
         self.lbl_quality_hint = QtWidgets.QLabel("Quality used: (depends on encoder)")
         form.addRow("Encoder:", self.lbl_encoder_status)
         form.addRow("Quality used:", self.lbl_quality_hint)
-        outer.addLayout(form)
+        layout.addLayout(form)
 
         # Plan summary
         self.plan_group = QtWidgets.QGroupBox("Plan Summary")
@@ -346,8 +407,8 @@ class MainWindow(QtWidgets.QMainWindow):
         plan_layout.addWidget(self.lbl_plan_prune)
         plan_layout.addWidget(self.lbl_plan_sync_tags)
         self.plan_group.setLayout(plan_layout)
-        self.plan_group.hide()  # Initially hidden
-        outer.addWidget(self.plan_group)
+        self.plan_group.hide()
+        layout.addWidget(self.plan_group)
 
         # Action buttons
         actions = QtWidgets.QHBoxLayout()
@@ -364,32 +425,7 @@ class MainWindow(QtWidgets.QMainWindow):
         actions.addWidget(self.btn_convert)
         actions.addWidget(self.btn_pause)
         actions.addWidget(self.btn_cancel)
-        outer.addLayout(actions)
-
-        # Progress + log
-        self.progress = QtWidgets.QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.hide()
-        outer.addWidget(self.progress)
-
-        self.log = QtWidgets.QTextEdit(readOnly=True)
-        self.log.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        outer.addWidget(self.log, 1)
-
-        # Connections
-        self.btn_preflight.clicked.connect(self.on_preflight)
-        self.btn_src.clicked.connect(lambda: self._pick_dir(self.edit_src))
-        self.btn_dest.clicked.connect(lambda: self._pick_dir(self.edit_dest))
-        self.btn_plan.clicked.connect(self.on_plan)
-        self.btn_convert.clicked.connect(self.on_convert)
-        self.btn_cancel.clicked.connect(self.on_cancel)
-        self.btn_pause.clicked.connect(self.on_pause_resume)
-        self.combo_codec.currentTextChanged.connect(self._on_codec_change)
-
-        # Logger → UI
-        self.log_emitter = LogEmitter()
-        self.log_emitter.message.connect(self.append_log)
-        setup_logger_for_gui(self.log_emitter, level=self.settings.log_level, json_path=self.settings.log_json)
+        layout.addLayout(actions)
 
     @staticmethod
     def _wrap_row(w: QtWidgets.QLayout | QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -402,6 +438,336 @@ class MainWindow(QtWidgets.QMainWindow):
             lay.addWidget(w)
             box.setLayout(lay)
         return box
+
+    def _setup_library_tab(self) -> None:
+        """Setup the library management tab."""
+        layout = QtWidgets.QVBoxLayout(self.library_tab)
+
+        # Library path selector
+        form = QtWidgets.QFormLayout()
+        self.edit_lib_root = QtWidgets.QLineEdit()
+        self.edit_lib_root.setPlaceholderText("FLAC library root directory")
+        self.btn_lib_root = QtWidgets.QPushButton("Browse…")
+        lib_row = QtWidgets.QHBoxLayout()
+        lib_row.addWidget(self.edit_lib_root)
+        lib_row.addWidget(self.btn_lib_root)
+        form.addRow("Library Root:", self._wrap_row(lib_row))
+
+        # Mirror output selector
+        self.edit_mirror_out = QtWidgets.QLineEdit()
+        self.edit_mirror_out.setPlaceholderText("Optional: Auto-run convert-dir to this directory")
+        self.btn_mirror_out = QtWidgets.QPushButton("Browse…")
+        mirror_row = QtWidgets.QHBoxLayout()
+        mirror_row.addWidget(self.edit_mirror_out)
+        mirror_row.addWidget(self.btn_mirror_out)
+        form.addRow("Mirror Output:", self._wrap_row(mirror_row))
+        layout.addLayout(form)
+
+        # Library settings
+        settings_group = QtWidgets.QGroupBox("Library Settings")
+        settings_layout = QtWidgets.QVBoxLayout(settings_group)
+
+        # Compression settings
+        comp_layout = QtWidgets.QHBoxLayout()
+        comp_layout.addWidget(QtWidgets.QLabel("Target Compression:"))
+        self.spin_lib_compression = QtWidgets.QSpinBox()
+        self.spin_lib_compression.setRange(0, 8)
+        self.spin_lib_compression.setValue(self.settings.flac_target_compression)
+        self.spin_lib_compression.setToolTip("FLAC compression level (0-8)")
+        comp_layout.addWidget(self.spin_lib_compression)
+        comp_layout.addStretch(1)
+        settings_layout.addLayout(comp_layout)
+
+        # Resample setting
+        resample_layout = QtWidgets.QHBoxLayout()
+        self.chk_lib_resample = QtWidgets.QCheckBox("Resample hi-res to CD quality")
+        self.chk_lib_resample.setChecked(self.settings.flac_resample_to_cd)
+        resample_layout.addWidget(self.chk_lib_resample)
+        resample_layout.addStretch(1)
+        settings_layout.addLayout(resample_layout)
+
+        # Spectrogram generation setting
+        spec_layout = QtWidgets.QHBoxLayout()
+        self.chk_lib_generate_specs = QtWidgets.QCheckBox("Generate spectrograms")
+        self.chk_lib_generate_specs.setChecked(False)  # Default off as it's optional
+        self.chk_lib_generate_specs.setToolTip("Generate spectrogram visualizations for audio files")
+        spec_layout.addWidget(self.chk_lib_generate_specs)
+        spec_layout.addStretch(1)
+        settings_layout.addLayout(spec_layout)
+
+        # Artwork settings
+        art_layout = QtWidgets.QFormLayout()
+        self.edit_lib_art_root = QtWidgets.QLineEdit()
+        self.edit_lib_art_root.setText(str(self.settings.flac_art_root or ""))
+        self.edit_lib_art_root.setPlaceholderText("Root directory for extracted artwork")
+        self.btn_lib_art_root = QtWidgets.QPushButton("Browse…")
+        art_root_row = QtWidgets.QHBoxLayout()
+        art_root_row.addWidget(self.edit_lib_art_root)
+        art_root_row.addWidget(self.btn_lib_art_root)
+        art_layout.addRow("Art Root:", self._wrap_row(art_root_row))
+
+        self.edit_lib_art_pattern = QtWidgets.QLineEdit()
+        self.edit_lib_art_pattern.setText(self.settings.flac_art_pattern or "")
+        self.edit_lib_art_pattern.setPlaceholderText("Pattern for artwork paths (e.g. {albumartist}/{album}/front.jpg)")
+        art_layout.addRow("Art Pattern:", self.edit_lib_art_pattern)
+        settings_layout.addLayout(art_layout)
+
+        # Worker settings
+        workers_layout = QtWidgets.QGridLayout()
+        workers_layout.addWidget(QtWidgets.QLabel("FLAC Workers:"), 0, 0)
+        self.spin_lib_flac_workers = QtWidgets.QSpinBox()
+        self.spin_lib_flac_workers.setRange(1, max(1, (QtCore.QThread.idealThreadCount() or 8)))
+        self.spin_lib_flac_workers.setValue(self.settings.flac_workers or (QtCore.QThread.idealThreadCount() or 2))
+        workers_layout.addWidget(self.spin_lib_flac_workers, 0, 1)
+
+        workers_layout.addWidget(QtWidgets.QLabel("Analysis Workers:"), 0, 2)
+        self.spin_lib_analysis_workers = QtWidgets.QSpinBox()
+        self.spin_lib_analysis_workers.setRange(1, max(1, (QtCore.QThread.idealThreadCount() or 8)))
+        self.spin_lib_analysis_workers.setValue(self.settings.flac_analysis_workers or (QtCore.QThread.idealThreadCount() or 4))
+        workers_layout.addWidget(self.spin_lib_analysis_workers, 0, 3)
+
+        workers_layout.addWidget(QtWidgets.QLabel("Art Workers:"), 1, 0)
+        self.spin_lib_art_workers = QtWidgets.QSpinBox()
+        self.spin_lib_art_workers.setRange(1, max(1, (QtCore.QThread.idealThreadCount() or 8)))
+        self.spin_lib_art_workers.setValue(self.settings.flac_art_workers or min(QtCore.QThread.idealThreadCount() or 4, 4))
+        workers_layout.addWidget(self.spin_lib_art_workers, 1, 1)
+        settings_layout.addLayout(workers_layout)
+
+        # Mirror settings
+        mirror_settings_layout = QtWidgets.QHBoxLayout()
+        mirror_settings_layout.addWidget(QtWidgets.QLabel("Mirror Codec:"))
+        self.combo_lib_mirror_codec = QtWidgets.QComboBox()
+        self.combo_lib_mirror_codec.addItems(["aac", "opus"])
+        self.combo_lib_mirror_codec.setCurrentText(self.settings.lossy_mirror_codec or "aac")
+        mirror_settings_layout.addWidget(self.combo_lib_mirror_codec)
+        mirror_settings_layout.addStretch(1)
+        settings_layout.addLayout(mirror_settings_layout)
+
+        layout.addWidget(settings_group)
+
+        # Counters and issues panel
+        self.counters_group = QtWidgets.QGroupBox("Library Status")
+        counters_layout = QtWidgets.QVBoxLayout(self.counters_group)
+
+        # Status counters
+        status_layout = QtWidgets.QGridLayout()
+        self.lbl_lib_scanned = QtWidgets.QLabel("Scanned: 0")
+        self.lbl_lib_tested_ok = QtWidgets.QLabel("Integrity OK: 0")
+        self.lbl_lib_tested_err = QtWidgets.QLabel("Integrity Failed: 0")
+        self.lbl_lib_resampled = QtWidgets.QLabel("Resampled: 0")
+        self.lbl_lib_recompressed = QtWidgets.QLabel("Recompressed: 0")
+        self.lbl_lib_art_exported = QtWidgets.QLabel("Artwork Exported: 0")
+        self.lbl_lib_held = QtWidgets.QLabel("Held: 0")
+        self.lbl_lib_spectrograms = QtWidgets.QLabel("Spectrograms Generated: 0")
+
+        status_layout.addWidget(self.lbl_lib_scanned, 0, 0)
+        status_layout.addWidget(self.lbl_lib_tested_ok, 0, 1)
+        status_layout.addWidget(self.lbl_lib_tested_err, 0, 2)
+        status_layout.addWidget(self.lbl_lib_resampled, 1, 0)
+        status_layout.addWidget(self.lbl_lib_recompressed, 1, 1)
+        status_layout.addWidget(self.lbl_lib_art_exported, 1, 2)
+        status_layout.addWidget(self.lbl_lib_spectrograms, 2, 1)
+        status_layout.addWidget(self.lbl_lib_held, 2, 2)
+
+        counters_layout.addLayout(status_layout)
+
+        # Issues panel
+        issues_group = QtWidgets.QGroupBox("Issues")
+        issues_layout = QtWidgets.QVBoxLayout(issues_group)
+        self.lib_issues_list = QtWidgets.QListWidget()
+        self.lib_issues_list.setMaximumHeight(100)
+        issues_layout.addWidget(self.lib_issues_list)
+        # Spectrogram links panel
+        spec_group = QtWidgets.QGroupBox("Spectrogram Links")
+        spec_layout = QtWidgets.QVBoxLayout(spec_group)
+        self.spec_links_list = QtWidgets.QListWidget()
+        self.spec_links_list.setMaximumHeight(150)
+        self.spec_links_list.itemDoubleClicked.connect(self._open_spectrogram_link)
+        spec_layout.addWidget(self.spec_links_list)
+        counters_layout.addWidget(spec_group)
+
+        # Action buttons
+        actions = QtWidgets.QHBoxLayout()
+        self.btn_lib_plan = QtWidgets.QPushButton("Plan Library")
+        self.btn_lib_run = QtWidgets.QPushButton("Run Library Maintenance")
+        self.btn_lib_cancel = QtWidgets.QPushButton("Cancel")
+        self.btn_lib_cancel.hide()
+        self.btn_lib_pause = QtWidgets.QPushButton("Pause")
+        self.btn_lib_pause.hide()
+
+        actions.addStretch(1)
+        actions.addWidget(self.btn_lib_plan)
+        actions.addWidget(self.btn_lib_run)
+        actions.addWidget(self.btn_lib_pause)
+        actions.addWidget(self.btn_lib_cancel)
+        layout.addLayout(actions)
+
+        # Connect library tab signals
+        self.btn_lib_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_root))
+        self.btn_lib_art_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_art_root))
+        self.btn_mirror_out.clicked.connect(lambda: self._pick_dir(self.edit_mirror_out))
+        self.btn_lib_plan.clicked.connect(self.on_lib_plan)
+        self.btn_lib_run.clicked.connect(self.on_lib_run)
+        self.btn_lib_cancel.clicked.connect(self.on_lib_cancel)
+        self.btn_lib_pause.clicked.connect(self.on_lib_pause_resume)
+
+    def _open_spectrogram_link(self, item):
+        """Open spectrogram file in default viewer."""
+        spec_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if spec_path and Path(spec_path).exists():
+            import subprocess
+            import sys
+            try:
+                if sys.platform == "darwin":  # macOS
+                    subprocess.run(["open", spec_path])
+                elif sys.platform == "win32":  # Windows
+                    subprocess.run(["start", spec_path], shell=True)
+                else:  # Linux
+                    subprocess.run(["xdg-open", spec_path])
+            except Exception as e:
+                logger.error(f"Failed to open spectrogram: {e}")
+        else:
+            logger.error(f"Spectrogram file not found: {spec_path}")
+
+    def on_lib_plan(self) -> None:
+        """Plan library maintenance (dry run)."""
+        self.log.clear()
+        self.counters_group.hide()
+        self.lib_issues_list.clear()
+        self._start_lib_operation(dry_run=True)
+
+    def on_lib_run(self) -> None:
+        """Run library maintenance."""
+        self.log.clear()
+        self.counters_group.hide()
+        self.lib_issues_list.clear()
+        self._start_lib_operation(dry_run=False)
+
+    def on_lib_cancel(self) -> None:
+        """Cancel library operation."""
+        logger.warning("Cancel requested by user.")
+        if hasattr(self, "lib_worker") and self.lib_worker.isRunning():
+            self.lib_worker.cancel()
+        self.btn_lib_cancel.setEnabled(False)
+        self.btn_lib_pause.setEnabled(False)
+
+    def on_lib_pause_resume(self) -> None:
+        """Pause/resume library operation."""
+        if hasattr(self, "lib_worker") and self.lib_worker.isRunning():
+            self.lib_worker.toggle_pause()
+            if self.btn_lib_pause.text() == "Pause":
+                logger.info("Pausing...")
+                self.btn_lib_pause.setText("Resume")
+            else:
+                logger.info("Resuming...")
+                self.btn_lib_pause.setText("Pause")
+
+    def _start_lib_operation(self, *, dry_run: bool) -> None:
+        """Start library operation."""
+        lib_root = self.edit_lib_root.text().strip()
+        if not lib_root or not Path(lib_root).exists():
+            QtWidgets.QMessageBox.warning(self, "Missing Library Root", "Please select a valid FLAC library root directory")
+            return
+
+        mirror_out = self.edit_mirror_out.text().strip() if self.edit_mirror_out.text().strip() else None
+
+        # Update settings with library-specific values
+        lib_overrides = {
+            "flac_target_compression": self.spin_lib_compression.value(),
+            "flac_resample_to_cd": self.chk_lib_resample.isChecked(),
+            "flac_generate_spectrograms": self.chk_lib_generate_specs.isChecked(),
+            "flac_art_root": Path(self.edit_lib_art_root.text().strip()) if self.edit_lib_art_root.text().strip() else None,
+            "flac_art_pattern": self.edit_lib_art_pattern.text().strip() or None,
+            "flac_workers": self.spin_lib_flac_workers.value(),
+            "flac_analysis_workers": self.spin_lib_analysis_workers.value(),
+            "flac_art_workers": self.spin_lib_art_workers.value(),
+            "lossy_mirror_codec": self.combo_lib_mirror_codec.currentText(),
+        }
+
+        # Apply overrides to settings
+        lib_settings = self.settings.model_copy(update=lib_overrides)
+
+        # Disable UI during run
+        for w in [self.btn_lib_plan, self.btn_lib_run, self.btn_preflight, self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out]:
+            w.hide()
+
+        self.btn_lib_pause.show()
+        self.btn_lib_cancel.show()
+        self.btn_lib_pause.setEnabled(True)
+        self.btn_lib_cancel.setEnabled(True)
+        self.btn_lib_pause.setText("Pause")
+        self.progress.show()
+
+        # Start library worker
+        self.lib_worker = LibraryWorker(
+            cfg=lib_settings,
+            root=lib_root,
+            mirror_out=mirror_out,
+            dry_run=dry_run,
+        )
+        self.lib_worker.summary_ready.connect(self._on_lib_summary_ready)
+        self.lib_worker.finished_with_code.connect(self._on_lib_done)
+        self.lib_worker.finished.connect(self._reenable_lib_ui)
+        self.lib_worker.start()
+
+    def _on_lib_summary_ready(self, summary: dict) -> None:
+        """Update UI with library summary."""
+        self.counters_group.show()
+
+        # Update counters
+        self.lbl_lib_scanned.setText(f"Scanned: {summary.get('scanned', 0)}")
+        self.lbl_lib_tested_ok.setText(f"Integrity OK: {summary.get('integrity_ok', 0)}")
+        self.lbl_lib_tested_err.setText(f"Integrity Failed: {summary.get('integrity_failed', 0)}")
+        self.lbl_lib_resampled.setText(f"Resampled: {summary.get('resample_to_cd', 0)}")
+        self.lbl_lib_recompressed.setText(f"Recompressed: {summary.get('recompress', 0)}")
+        self.lbl_lib_art_exported.setText(f"Artwork Exported: {summary.get('extract_art', 0)}")
+        self.lbl_lib_spectrograms.setText(f"Spectrograms Generated: {summary.get('generate_spectrogram', 0)}")
+        self.lbl_lib_held.setText(f"Held: {summary.get('hold', 0)}")
+
+        # Show timing information
+        timing = summary.get("timing_s", {})
+        if timing:
+            total_time = summary.get("total_time_s", 0)
+            logger.info(f"Library operation timing: total={total_time:.1f}s")
+            for phase, time_taken in timing.items():
+                logger.info(f"  {phase}: {time_taken:.1f}s")
+
+    def _on_lib_done(self, code: int) -> None:
+        """Handle library operation completion."""
+        if code == 0:
+            QtWidgets.QMessageBox.information(self, "Library Complete", "Library maintenance completed successfully")
+        else:
+            QtWidgets.QMessageBox.warning(self, "Library Complete", "Library maintenance completed with errors. See log for details.")
+
+    def _reenable_lib_ui(self) -> None:
+        """Re-enable library UI after operation."""
+        self.progress.hide()
+        self.btn_lib_pause.hide()
+        self.btn_lib_cancel.hide()
+        for w in [self.btn_lib_plan, self.btn_lib_run, self.btn_preflight, self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out]:
+            w.show()
+            w.setEnabled(True)
+        self._apply_encoder_ui()
+
+    def _setup_shared_components(self, outer: QtWidgets.QVBoxLayout) -> None:
+        """Setup components shared between tabs (preflight, progress, log)."""
+        # Preflight row
+        pf_row = QtWidgets.QHBoxLayout()
+        self.btn_preflight = QtWidgets.QPushButton("Preflight")
+        self.lbl_preflight = QtWidgets.QLabel("Not checked")
+        pf_row.addWidget(self.btn_preflight)
+        pf_row.addWidget(self.lbl_preflight, 1)
+        outer.addLayout(pf_row)
+
+        # Progress + log
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.hide()
+        outer.addWidget(self.progress)
+
+        self.log = QtWidgets.QTextEdit(readOnly=True)
+        self.log.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        outer.addWidget(self.log, 1)
 
     def append_log(self, line: str) -> None:
         self.log.append(line)

@@ -69,6 +69,7 @@ class PacSettings(BaseSettings):
     # FLAC Library management
     flac_target_compression: int = Field(default=8, description="Target FLAC compression level (0-8)")
     flac_resample_to_cd: bool = Field(default=True, description="Resample hi-res FLAC to CD quality (44.1kHz, 16-bit, 2ch)")
+    flac_generate_spectrograms: bool = Field(default=False, description="Generate spectrogram visualizations")
     flac_stop_on: Literal["never","suspect","error"] = Field(default="error", description="Stop processing on suspect/error/never")
     flac_art_root: str = Field(default="~/Music/_art", description="Root directory for extracted artwork")
     flac_art_pattern: str = Field(default="{albumartist}/{album}/front.jpg", description="Pattern for artwork paths")
@@ -175,6 +176,7 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         # FLAC settings
         "flac_target_compression",
         "flac_resample_to_cd",
+        "flac_generate_spectrograms",
         "flac_stop_on",
         "flac_art_root",
         "flac_art_pattern",

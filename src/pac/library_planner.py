@@ -153,14 +153,42 @@ def plan_library_actions(
         except Exception as e:
             logger.debug(f"Error checking artwork for {src_path}: {e}")
 
-        if art_needed:
-            plan.append(LibraryPlanItem(
-                action="extract_art",
-                reason="Extract embedded artwork to structured folders",
-                src_path=src_path,
-                rel_path=rel_path,
-                flac_md5=md5,
-                params={"art_path": str(potential_art_path) if potential_art_path else None}
-            ))
+        # Phase 6: Spectrogram generation (optional)
+        # Check if spectrogram needs to be generated
+        if cfg.flac_generate_spectrograms:
+            from .flac_tools import generate_spectrogram
+
+            spec_path = None
+            try:
+                # Use same pattern as artwork but for spectrograms
+                spec_root = Path(cfg.flac_art_root).expanduser() if cfg.flac_art_root else Path(src_path).parent
+                spec_pattern = cfg.flac_art_pattern or "{albumartist}/{album}/spectrogram.png"
+                # For spectrograms, we can reuse the art pattern logic but change extension
+                from .flac_tools import _resolve_art_pattern
+                flac_obj = FLAC(str(src_path))
+                if flac_obj:
+                    spec_path = _resolve_art_pattern(spec_pattern, flac_obj, spec_root)
+                    if spec_path:
+                        spec_path = spec_path.parent / f"{spec_path.stem}_spectrogram.png"
+
+                        # Check if spectrogram exists and is up to date
+                        if spec_path.exists():
+                            spec_mtime = spec_path.stat().st_mtime
+                            src_mtime = src_path.stat().st_mtime
+                            if spec_mtime >= src_mtime:
+                                # Spectrogram is up to date
+                                spec_path = None
+            except Exception as e:
+                logger.debug(f"Error checking spectrogram for {src_path}: {e}")
+
+            if spec_path:
+                plan.append(LibraryPlanItem(
+                    action="generate_spectrogram",
+                    reason="Generate spectrogram visualization",
+                    src_path=src_path,
+                    rel_path=rel_path,
+                    flac_md5=md5,
+                    params={"spec_path": str(spec_path)}
+                ))
 
     return plan
