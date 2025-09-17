@@ -14,7 +14,6 @@ from .db import PacDB
 from .scheduler import WorkerPool
 from .library_planner import plan_library_actions, LibraryPlanItem
 from .flac_tools import flac_test, recompress_flac, resample_to_cd_flac, extract_art, generate_spectrogram
-from .auth_tools import run_aucdtect, run_lac, classify_authenticity
 from .scanner import scan_flac_files
 # from .convert_dir import cmd_convert_dir  # TODO: Import the existing convert-dir function
 
@@ -69,7 +68,6 @@ def cmd_manage_library(
         "scanned": len(sources),
         "planned": len(plan),
         "test_integrity": len(actions_by_type.get("test_integrity", [])),
-        "analyze_auth": len(actions_by_type.get("analyze_auth", [])),
         "resample_to_cd": len(actions_by_type.get("resample_to_cd", [])),
         "recompress": len(actions_by_type.get("recompress", [])),
         "extract_art": len(actions_by_type.get("extract_art", [])),
@@ -103,10 +101,6 @@ def cmd_manage_library(
             summary["integrity_ok"] = sum(1 for r in integrity_results if r[1])
             summary["integrity_failed"] = sum(1 for r in integrity_results if not r[1])
 
-        # Phase 2: Authenticity analysis
-        if "analyze_auth" in actions_by_type:
-            logger.info("Phase 2: Authenticity analysis")
-            _execute_auth_phase(actions_by_type["analyze_auth"], analysis_pool, db, now_ts, cfg, stop_event, pause_event)
 
         # Phase 3: Resampling
         if "resample_to_cd" in actions_by_type:
@@ -181,41 +175,6 @@ def _execute_integrity_phase(items: List[LibraryPlanItem], pool: WorkerPool, db:
     return results
 
 
-def _execute_auth_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB, now_ts: int, cfg: PacSettings, stop_event, pause_event):
-    """Execute authenticity analysis phase."""
-    def task(item: LibraryPlanItem):
-        aucdtect_result = run_aucdtect(item.src_path)
-        lac_result = run_lac(item.src_path)
-        status, details = classify_authenticity(aucdtect_result, lac_result)
-
-        if db:
-            db.conn.execute("""
-                INSERT OR REPLACE INTO authenticity
-                (md5, aucdtect_score, aucdtect_class, lac_result, analyzed_ts, status, spectrogram_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                item.flac_md5,
-                aucdtect_result.get("score"),
-                aucdtect_result.get("classification"),
-                lac_result.get("result"),
-                now_ts,
-                status,
-                None,  # spectrogram_path
-            ))
-
-        # Generate spectrogram if suspect and enabled
-        if status == "suspect" and cfg.spectrogram_enabled:
-            # Generate spectrogram
-            pass  # Stub
-
-        return status
-
-    for item in items:
-        if stop_event.is_set():
-            break
-        pause_event.wait()
-        status = task(item)
-        logger.info(f"Authenticity {status}: {item.rel_path}")
 
 
 def _execute_resample_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB, now_ts: int, cfg: PacSettings, stop_event, pause_event):

@@ -13,13 +13,12 @@ from .config import PacSettings
 from .scanner import SourceFile
 from .db import PacDB
 from .flac_tools import flac_stream_info, needs_cd_downmix, get_flac_tag
-from .auth_tools import probe_aucdtect, probe_lac
 
 
 @dataclass
 class LibraryPlanItem:
     """A planned action for FLAC maintenance."""
-    action: Literal["test_integrity", "analyze_auth", "resample_to_cd", "recompress", "extract_art", "hold", "skip"]
+    action: Literal["test_integrity", "resample_to_cd", "recompress", "extract_art", "hold", "skip"]
     reason: str
     src_path: Path
     rel_path: Path
@@ -36,10 +35,6 @@ def plan_library_actions(
     """Plan actions for FLAC library maintenance."""
     plan = []
 
-    # Probe tools once
-    flac_probe = None  # We'll add this later
-    aucdtect_probe = probe_aucdtect()
-    lac_probe = probe_lac()
 
     for src in sources:
         src_path = src.path
@@ -69,26 +64,6 @@ def plan_library_actions(
             params={"streaminfo": info}
         ))
 
-        # Phase 2: Authenticity (if enabled and eligible)
-        if cfg.flac_auth_enabled:
-            skip_auth = False
-            if cfg.flac_auth_skip_highbit and info.get('bit_depth', 16) > 16:
-                skip_auth = True
-            if cfg.flac_auth_skip_lossy_mastered:
-                # Check for lossy-mastered tags
-                compression_tag = get_flac_tag(src_path, "COMPRESSION")
-                if compression_tag and "lossy" in compression_tag.lower():
-                    skip_auth = True
-
-            if not skip_auth and aucdtect_probe.available and lac_probe.available:
-                plan.append(LibraryPlanItem(
-                    action="analyze_auth",
-                    reason="Check for transcoding artifacts",
-                    src_path=src_path,
-                    rel_path=rel_path,
-                    flac_md5=md5,
-                    params={"bit_depth": info.get('bit_depth', 16)}
-                ))
 
         # Phase 3: Resample to CD if needed
         if cfg.flac_resample_to_cd and needs_cd_downmix(info):

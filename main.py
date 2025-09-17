@@ -881,14 +881,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("preflight", help="Check ffmpeg and AAC encoder availability")
 
-    p_library = sub.add_parser("library", help="Manage FLAC library: integrity, compression, authenticity, artwork")
+    p_library = sub.add_parser("library", help="Manage FLAC library: integrity, compression, artwork")
     p_library.add_argument("--root", required=True, help="FLAC library root directory")
     p_library.add_argument("--target-compression", type=int, default=None, help="Target FLAC compression level (0-8)")
     p_library.add_argument("--resample-to-cd", choices=["on", "off"], default=None, help="Resample hi-res to CD quality")
-    p_library.add_argument("--auth", choices=["on", "off"], default=None, help="Enable authenticity analysis")
-    p_library.add_argument("--auth-skip-highbit", choices=["on", "off"], default=None, help="Skip auth for >16-bit files")
-    p_library.add_argument("--auth-skip-lossy-mastered", choices=["on", "off"], default=None, help="Skip auth for lossy-mastered files")
-    p_library.add_argument("--spectrogram", choices=["on", "off"], default=None, help="Generate spectrograms for suspect files")
     p_library.add_argument("--art-root", default=None, help="Root directory for extracted artwork")
     p_library.add_argument("--art-pattern", default=None, help="Pattern for artwork paths")
     p_library.add_argument("--flac-workers", type=int, default=None, help="Workers for FLAC encoding/resampling")
@@ -1131,14 +1127,6 @@ def main(argv: list[str] | None = None) -> int:
             library_overrides["flac_target_compression"] = args.target_compression
         if args.resample_to_cd is not None:
             library_overrides["flac_resample_to_cd"] = args.resample_to_cd == "on"
-        if args.auth is not None:
-            library_overrides["flac_auth_enabled"] = args.auth == "on"
-        if args.auth_skip_highbit is not None:
-            library_overrides["flac_auth_skip_highbit"] = args.auth_skip_highbit == "on"
-        if args.auth_skip_lossy_mastered is not None:
-            library_overrides["flac_auth_skip_lossy_mastered"] = args.auth_skip_lossy_mastered == "on"
-        if args.spectrogram is not None:
-            library_overrides["spectrogram_enabled"] = args.spectrogram == "on"
         if args.art_root is not None:
             library_overrides["flac_art_root"] = args.art_root
         if args.art_pattern is not None:

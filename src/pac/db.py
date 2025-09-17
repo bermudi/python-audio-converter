@@ -105,17 +105,6 @@ class PacDB:
                 )
             """)
             self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS authenticity (
-                    md5 TEXT PRIMARY KEY,
-                    aucdtect_score REAL,
-                    aucdtect_class TEXT,
-                    lac_result TEXT,
-                    analyzed_ts INTEGER,
-                    status TEXT CHECK(status IN ('ok','suspect','error')),
-                    spectrogram_path TEXT
-                )
-            """)
-            self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS art_exports (
                     md5 TEXT PRIMARY KEY,
                     path TEXT,
