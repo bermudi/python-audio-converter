@@ -294,16 +294,3 @@ def extract_art(src: Path, art_root: Path, pattern: str) -> Optional[Path]:
         logger.error(f"Failed to extract artwork from {src}: {e}")
         return None
 
-
-def generate_spectrogram(src: Path, png_path: Path) -> bool:
-    """Generate spectrogram using ffmpeg."""
-    try:
-        result = subprocess.run([
-            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-i", str(src),
-            "-lavfi", "showspectrumpic=s=1280x720:legend=disabled:color=rainbow",
-            str(png_path)
-        ], capture_output=True, text=True, timeout=120)
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
-        return False

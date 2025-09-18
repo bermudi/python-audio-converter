@@ -68,7 +68,7 @@ What we will add (by component)
     - Optional “hold list” file with the md5/paths that need human attention
 
 - Update GUI
-  - Add a “FLAC Library” tab: Preflight tools, settings (checkboxes), Plan (dry-run), Run, counters per phase, “Issues found” panel, and artifact links (spectrograms).
+  - Add a "FLAC Library" tab: Preflight tools, settings (checkboxes), Plan (dry-run), Run, counters per phase, "Issues found" panel.
 
 4) Config (pydantic)
 Extend PacSettings with:
@@ -134,7 +134,7 @@ Early‑stop logic
   - library: { scanned, tested_ok, tested_err, resampled, recompressed, recompress_skipped, art_exported, held, failed }
   - mirror: reuse existing counts
 - DB: write rows into new tables; also append observations for each step.
-- Hold list: write markdown/CSV with file, reason, tool outputs, spectrogram link for triage.
+- Hold list: write markdown/CSV with file, reason, tool outputs for triage.
 
 Key data structures (sketch)
 - pac/library_planner.py
@@ -192,7 +192,7 @@ Milestones (with acceptance criteria)
 - M6: Mirror orchestration
   - pac library optionally calls convert-dir for “clean” sources only; end‑to‑end test.
 - M7: GUI
-  - New tab with plan/run; counters and issues panel; spectrogram links.
+  - New tab with plan/run; counters and issues panel.
 - M8: Docs and polish
   - User guide; migration notes; troubleshooting.
 

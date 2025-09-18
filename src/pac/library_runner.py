@@ -13,7 +13,7 @@ from .config import PacSettings
 from .db import PacDB
 from .scheduler import WorkerPool
 from .library_planner import plan_library_actions, LibraryPlanItem
-from .flac_tools import flac_test, recompress_flac, resample_to_cd_flac, extract_art, generate_spectrogram
+from .flac_tools import flac_test, recompress_flac, resample_to_cd_flac, extract_art
 from .scanner import scan_flac_files
 from .convert_dir import cmd_convert_dir  # Import the existing convert-dir function
 
@@ -71,7 +71,6 @@ def cmd_manage_library(
         "resample_to_cd": len(actions_by_type.get("resample_to_cd", [])),
         "recompress": len(actions_by_type.get("recompress", [])),
         "extract_art": len(actions_by_type.get("extract_art", [])),
-        "generate_spectrogram": len(actions_by_type.get("generate_spectrogram", [])),
         "hold": len(actions_by_type.get("hold", [])),
     }
 
@@ -115,13 +114,6 @@ def cmd_manage_library(
         start_time = time.time()
         _execute_art_phase(actions_by_type["extract_art"], art_pool, db, now_ts, cfg, stop_event, pause_event)
         timing["artwork"] = time.time() - start_time
-
-    # Phase 6: Spectrogram generation
-    if "generate_spectrogram" in actions_by_type:
-        logger.info("Phase 6: Spectrogram generation")
-        start_time = time.time()
-        _execute_spectrogram_phase(actions_by_type["generate_spectrogram"], art_pool, db, now_ts, cfg, stop_event, pause_event)
-        timing["spectrogram"] = time.time() - start_time
 
     # Add timing to summary
     summary["timing_s"] = timing
@@ -269,28 +261,6 @@ def _execute_art_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB
         logger.info(f"Artwork {'OK' if art_path else 'SKIP'}: {item.rel_path}")
 
 
-def _execute_spectrogram_phase(items: List[LibraryPlanItem], pool: WorkerPool, db: PacDB, now_ts: int, cfg: PacSettings, stop_event, pause_event):
-    """Execute spectrogram generation phase with parallel execution."""
-    max_pending = min(len(items), pool._max_workers * 4)  # 4x workers for bounded window
-
-    def task(item: LibraryPlanItem):
-        spec_path = Path(item.params["spec_path"])
-        spec_path.parent.mkdir(parents=True, exist_ok=True)
-        success = generate_spectrogram(item.src_path, spec_path)
-        if success and db:
-            db.begin()
-            db.conn.execute("""
-                INSERT OR REPLACE INTO art_exports
-                (md5, path, last_export_ts, mime, size)
-                VALUES (?, ?, ?, ?, ?)
-            """, (item.flac_md5, str(spec_path), now_ts, "image/png", spec_path.stat().st_size if spec_path.exists() else 0))
-            db.commit()
-        return item, success
-
-    for item, (result_item, success) in pool.imap_unordered_bounded(
-        task, items, max_pending, stop_event=stop_event, pause_event=pause_event
-    ):
-        logger.info(f"Spectrogram {'OK' if success else 'FAILED'}: {item.rel_path}")
 
 
 def _was_held(md5: str, plan: List[LibraryPlanItem]) -> bool:
