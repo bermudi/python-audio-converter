@@ -701,44 +701,13 @@ def cmd_convert_dir(
                 elif ver_status == "failed":
                     ver_failed += 1
             # no DB ops in stateless mode
+            sz = None
             try:
                 sz = dest_path.stat().st_size
                 total_bytes += sz
             except Exception:
                 pass
-            logger.bind(action="encode", file=str(pi.rel_path), status="ok", elapsed_ms=int(elapsed_s*1000), bytes_out=int(sz) if 'sz' in locals() else None).info("encode complete")
-            logger.info(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}")
-        else:
-            failed += 1
-            logger.bind(action="encode", file=str(pi.rel_path), status="error", elapsed_ms=int(elapsed_s*1000)).error("encode failed")
-            logger.error(f"[{done}/{len(to_convert)}] ERR {pi.rel_path} -> {pi.output_rel}")
-            # no DB ops in stateless mode
-
-    successful_encodes = []
-    for pi, res in pool.imap_unordered_bounded(
-        _task, to_convert, max_pending=bound, stop_event=stop_event, pause_event=pause_event
-    ):
-        dest_path = out_root / pi.output_rel
-        _, rc, elapsed_s, ver_status = res
-        done += 1
-        if rc == 0:
-            converted += 1
-            successful_encodes.append((pi, elapsed_s))
-            if verify_tags:
-                ver_checked += 1
-                if ver_status == "ok":
-                    ver_ok += 1
-                elif ver_status == "warn":
-                    ver_warn += 1
-                elif ver_status == "failed":
-                    ver_failed += 1
-            # no DB ops in stateless mode
-            try:
-                sz = dest_path.stat().st_size
-                total_bytes += sz
-            except Exception:
-                pass
-            logger.bind(action="encode", file=str(pi.rel_path), status="ok", elapsed_ms=int(elapsed_s*1000), bytes_out=int(sz) if 'sz' in locals() else None).info("encode complete")
+            logger.bind(action="encode", file=str(pi.rel_path), status="ok", elapsed_ms=int(elapsed_s*1000), bytes_out=sz).info("encode complete")
             logger.info(f"[{done}/{len(to_convert)}] OK  {pi.rel_path} -> {pi.output_rel}")
         else:
             failed += 1
@@ -778,7 +747,7 @@ def cmd_convert_dir(
                         str(pi.flac_md5),
                         str(pi.rel_path),
                         str(pi.output_rel),
-                        f'{"elapsed_ms": {int(elapsed_s*1000)}}',
+                        json.dumps({"elapsed_ms": int(elapsed_s*1000)}),
                     )
             db.commit()
         except Exception as e:
@@ -931,7 +900,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Treat any tag verification discrepancy as a failure",
     )
 
-    p_dir = sub.add_subparser if False else sub.add_parser(  # keep structure simple
+    p_dir = sub.add_parser(
         "convert-dir",
         help="Batch convert a source directory of .flac files to a destination tree",
     )

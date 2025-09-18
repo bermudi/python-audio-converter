@@ -24,6 +24,8 @@ def cmd_manage_library(
     *,
     mirror_out: Optional[str] = None,
     dry_run: bool = False,
+    stop_event: Optional[threading.Event] = None,
+    pause_event: Optional[threading.Event] = None,
     **kwargs
 ) -> Tuple[int, Dict[str, Any]]:
     """Manage FLAC library: maintenance + optional mirror update."""
@@ -52,7 +54,7 @@ def cmd_manage_library(
 
     if not sources:
         logger.info("No FLAC files found")
-        return 0, {"scanned": 0}
+        return 0, {"scanned": 0, "planned": 0}
 
     # Plan actions
     logger.info(f"Planning actions for {len(sources)} files")
@@ -79,6 +81,11 @@ def cmd_manage_library(
         for action, items in actions_by_type.items():
             logger.info(f"  {action}: {len(items)} files")
         return 0, summary
+
+    # Create worker pools
+    analysis_pool = WorkerPool(cfg.flac_analysis_workers or (cfg.workers or 4))
+    encode_pool = WorkerPool(cfg.flac_workers or (cfg.workers or 2))
+    art_pool = WorkerPool(cfg.flac_art_workers or min((cfg.workers or 4), 4))
 
     # Execute phases
     logger.info("Executing FLAC library maintenance...")
@@ -140,12 +147,52 @@ def cmd_manage_library(
 
         if clean_sources:
             logger.info(f"Found {len(clean_sources)} clean sources for mirror update")
-            # For now, implement a simple approach by calling the main convert-dir logic
-            # This is a placeholder - the full implementation would require extracting
-            # the convert-dir logic from main.py into a reusable function
-            logger.info("Mirror update: Would process clean sources (implementation pending)")
-            timing["mirror"] = time.time() - start_time
-            summary["mirror"] = {"clean_sources": len(clean_sources), "status": "pending_implementation"}
+            # Create temporary source directory for clean sources using symlinks to avoid copying
+            import tempfile
+            import shutil
+            with tempfile.TemporaryDirectory() as temp_src:
+                temp_src_path = Path(temp_src)
+                for src_file in clean_sources:
+                    rel = src_file.rel_path
+                    temp_path = temp_src_path / rel
+                    temp_path.parent.mkdir(parents=True, exist_ok=True)
+                    temp_path.symlink_to(src_file.path, target_is_symlink=True)
+                # Call cmd_convert_dir with temp_src as source, mirror_out as dest
+                mirror_codec = cfg.lossy_mirror_codec
+                exit_code, mirror_summary = cmd_convert_dir(
+                    cfg,
+                    str(temp_src_path),
+                    mirror_out,
+                    codec=mirror_codec,
+                    tvbr=cfg.tvbr if mirror_codec == "aac" else 0,  # default for aac
+                    vbr=cfg.vbr if mirror_codec == "aac" else 0,
+                    opus_vbr_kbps=cfg.opus_vbr_kbps if mirror_codec == "opus" else 0,
+                    workers=cfg.workers,
+                    verbose=True,
+                    dry_run=False,
+                    force_reencode=False,
+                    allow_rename=True,
+                    retag_existing=True,
+                    prune_orphans=False,
+                    no_adopt=False,
+                    sync_tags=False,
+                    log_json_path=None,
+                    verify_tags=cfg.verify_tags,
+                    verify_strict=cfg.verify_strict,
+                    cover_art_resize=cfg.cover_art_resize,
+                    cover_art_max_size=cfg.cover_art_max_size,
+                    stop_event=stop_event,
+                    pause_event=pause_event,
+                    interactive=False,
+                )
+                timing["mirror"] = time.time() - start_time
+                summary["mirror"] = {
+                    "clean_sources": len(clean_sources),
+                    "exit_code": exit_code,
+                    "summary": mirror_summary
+                }
+                if exit_code != 0:
+                    logger.warning(f"Mirror update completed with errors (code {exit_code})")
         else:
             logger.info("No clean sources found for mirror update")
             timing["mirror"] = time.time() - start_time

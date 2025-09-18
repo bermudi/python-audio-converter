@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
 from pac.config import PacSettings  # noqa: E402
 from pac.library_runner import cmd_manage_library  # noqa: E402
+from main import configure_logging, cmd_convert_dir, EXIT_OK, EXIT_WITH_FILE_ERRORS, EXIT_PREFLIGHT_FAILED  # noqa: E402
 
 
 class LogEmitter(QtCore.QObject):
@@ -485,16 +486,7 @@ class MainWindow(QtWidgets.QMainWindow):
         resample_layout.addWidget(self.chk_lib_resample)
         resample_layout.addStretch(1)
         settings_layout.addLayout(resample_layout)
-
-        # Spectrogram generation setting
-        spec_layout = QtWidgets.QHBoxLayout()
-        self.chk_lib_generate_specs = QtWidgets.QCheckBox("Generate spectrograms")
-        self.chk_lib_generate_specs.setChecked(False)  # Default off as it's optional
-        self.chk_lib_generate_specs.setToolTip("Generate spectrogram visualizations for audio files")
-        spec_layout.addWidget(self.chk_lib_generate_specs)
-        spec_layout.addStretch(1)
-        settings_layout.addLayout(spec_layout)
-
+    
         # Artwork settings
         art_layout = QtWidgets.QFormLayout()
         self.edit_lib_art_root = QtWidgets.QLineEdit()
@@ -558,33 +550,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_lib_recompressed = QtWidgets.QLabel("Recompressed: 0")
         self.lbl_lib_art_exported = QtWidgets.QLabel("Artwork Exported: 0")
         self.lbl_lib_held = QtWidgets.QLabel("Held: 0")
-        self.lbl_lib_spectrograms = QtWidgets.QLabel("Spectrograms Generated: 0")
-
+    
         status_layout.addWidget(self.lbl_lib_scanned, 0, 0)
         status_layout.addWidget(self.lbl_lib_tested_ok, 0, 1)
         status_layout.addWidget(self.lbl_lib_tested_err, 0, 2)
         status_layout.addWidget(self.lbl_lib_resampled, 1, 0)
         status_layout.addWidget(self.lbl_lib_recompressed, 1, 1)
         status_layout.addWidget(self.lbl_lib_art_exported, 1, 2)
-        status_layout.addWidget(self.lbl_lib_spectrograms, 2, 1)
         status_layout.addWidget(self.lbl_lib_held, 2, 2)
-
+    
         counters_layout.addLayout(status_layout)
-
+    
         # Issues panel
         issues_group = QtWidgets.QGroupBox("Issues")
         issues_layout = QtWidgets.QVBoxLayout(issues_group)
         self.lib_issues_list = QtWidgets.QListWidget()
         self.lib_issues_list.setMaximumHeight(100)
         issues_layout.addWidget(self.lib_issues_list)
-        # Spectrogram links panel
-        spec_group = QtWidgets.QGroupBox("Spectrogram Links")
-        spec_layout = QtWidgets.QVBoxLayout(spec_group)
-        self.spec_links_list = QtWidgets.QListWidget()
-        self.spec_links_list.setMaximumHeight(150)
-        self.spec_links_list.itemDoubleClicked.connect(self._open_spectrogram_link)
-        spec_layout.addWidget(self.spec_links_list)
-        counters_layout.addWidget(spec_group)
+        counters_layout.addWidget(issues_group)
 
         # Action buttons
         actions = QtWidgets.QHBoxLayout()
@@ -610,24 +593,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_lib_run.clicked.connect(self.on_lib_run)
         self.btn_lib_cancel.clicked.connect(self.on_lib_cancel)
         self.btn_lib_pause.clicked.connect(self.on_lib_pause_resume)
-
-    def _open_spectrogram_link(self, item):
-        """Open spectrogram file in default viewer."""
-        spec_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
-        if spec_path and Path(spec_path).exists():
-            import subprocess
-            import sys
-            try:
-                if sys.platform == "darwin":  # macOS
-                    subprocess.run(["open", spec_path])
-                elif sys.platform == "win32":  # Windows
-                    subprocess.run(["start", spec_path], shell=True)
-                else:  # Linux
-                    subprocess.run(["xdg-open", spec_path])
-            except Exception as e:
-                logger.error(f"Failed to open spectrogram: {e}")
-        else:
-            logger.error(f"Spectrogram file not found: {spec_path}")
 
     def on_lib_plan(self) -> None:
         """Plan library maintenance (dry run)."""
@@ -675,8 +640,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lib_overrides = {
             "flac_target_compression": self.spin_lib_compression.value(),
             "flac_resample_to_cd": self.chk_lib_resample.isChecked(),
-            "flac_generate_spectrograms": self.chk_lib_generate_specs.isChecked(),
-            "flac_art_root": Path(self.edit_lib_art_root.text().strip()) if self.edit_lib_art_root.text().strip() else None,
+            "flac_art_root": self.edit_lib_art_root.text().strip() if self.edit_lib_art_root.text().strip() else None,
             "flac_art_pattern": self.edit_lib_art_pattern.text().strip() or None,
             "flac_workers": self.spin_lib_flac_workers.value(),
             "flac_analysis_workers": self.spin_lib_analysis_workers.value(),
@@ -721,7 +685,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_lib_resampled.setText(f"Resampled: {summary.get('resample_to_cd', 0)}")
         self.lbl_lib_recompressed.setText(f"Recompressed: {summary.get('recompress', 0)}")
         self.lbl_lib_art_exported.setText(f"Artwork Exported: {summary.get('extract_art', 0)}")
-        self.lbl_lib_spectrograms.setText(f"Spectrograms Generated: {summary.get('generate_spectrogram', 0)}")
         self.lbl_lib_held.setText(f"Held: {summary.get('hold', 0)}")
 
         # Show timing information

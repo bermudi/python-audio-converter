@@ -153,7 +153,7 @@ def build_dest_index(
                         now_ts,
                         e.size,
                         e.mtime_ns,
-                        1 if e.pac_src_md5 else 0,
+                        bool(e.pac_src_md5),
                     )
                     for e in index.all_entries()
                 ]

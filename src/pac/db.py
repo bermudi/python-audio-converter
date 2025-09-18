@@ -142,11 +142,11 @@ class PacDB:
             [(f[0], f[4], f[1], f[1]) for f in files]
         )
 
-    def upsert_many_outputs(self, outputs: list[tuple[str, str, str, str, str, str, int, int, int, int]]) -> None:
+    def upsert_many_outputs(self, outputs: list[tuple[str, str, str, str, str, str, int, int, int, bool]]) -> None:
         """Upsert a batch of output files."""
         self.conn.executemany(
             """INSERT INTO outputs (md5, dest_rel, container, encoder, quality, pac_version, first_seen_ts, last_seen_ts, last_size, last_mtime_ns, last_seen_had_pac_tags)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, COALESCE(first_seen_ts, ?), ?, ?, ?, ?)
                ON CONFLICT(md5, dest_rel) DO UPDATE SET
                    last_seen_ts = excluded.last_seen_ts,
                    last_size = excluded.last_size,
@@ -160,11 +160,10 @@ class PacDB:
                     o[3], # encoder
                     o[4], # quality
                     o[5], # pac_version
-                    o[6], # first_seen_ts
-                    o[6], # last_seen_ts
-                    o[7], # last_size
-                    o[8], # last_mtime_ns
-                    1 if o[0] else 0, # last_seen_had_pac_tags
+                    o[6], # seen_ts for first/last
+                    o[7], # size
+                    o[8], # mtime_ns
+                    o[9], # had_pac_tags
                 )
                 for o in outputs
             ]

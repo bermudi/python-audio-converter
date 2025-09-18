@@ -153,4 +153,18 @@ def plan_library_actions(
         except Exception as e:
             logger.debug(f"Error checking artwork for {src_path}: {e}")
 
+        if art_needed:
+            plan.append(LibraryPlanItem(
+                action="extract_art",
+                reason="Export front cover artwork",
+                src_path=src_path,
+                rel_path=rel_path,
+                flac_md5=md5,
+                params={
+                    "art_root": str(art_root),
+                    "art_pattern": art_pattern,
+                    "potential_path": str(potential_art_path) if potential_art_path else None
+                }
+            ))
+
     return plan
