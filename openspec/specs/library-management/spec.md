@@ -156,29 +156,37 @@ The GUI SHALL support dry-run mode for individual operations, showing what would
 - **THEN** the system SHALL display files that would be recompressed without modifying them
 
 ### Requirement: Library Scan Operation
-The GUI SHALL provide a non-destructive scan operation that analyzes library state without modifying any files.
+The GUI SHALL provide a non-destructive scan operation that analyzes library state without modifying any files. Scans SHALL be triggered automatically when a valid path is entered, or manually via a Rescan button.
 
 #### Scenario: Scan library
-- **WHEN** user clicks "Scan" on a library root
-- **THEN** the system SHALL analyze all FLAC files and display their status without making changes
+- **WHEN** user enters a valid library root path
+- **THEN** the system SHALL automatically analyze all FLAC files and display their status without making changes
 
 #### Scenario: Scan shows file count
 - **WHEN** scan completes
 - **THEN** the system SHALL display total file count and breakdown by status category
 
+#### Scenario: Manual rescan
+- **WHEN** user clicks the Rescan button on an already-scanned library
+- **THEN** the system SHALL re-scan and refresh the display
+
 ### Requirement: Library Browser View
-The GUI SHALL provide a browsable view of the library showing files with their status indicators.
+The GUI SHALL provide a browsable view of the library showing files with their status indicators. The browser SHALL support multiple view modes: Source Only (FLAC library), With Outputs (correlated source↔output), and Outputs Only (mirror directory).
 
 #### Scenario: Tree view display
 - **WHEN** scan completes
-- **THEN** the system SHALL display files in a tree structure matching directory hierarchy
+- **THEN** the system SHALL display files in a table matching directory hierarchy
 
 #### Scenario: Status indicators shown
 - **WHEN** files are displayed in browser
 - **THEN** each file SHALL show icons/colors indicating: integrity status (unknown/ok/failed), audio format (CD/hi-res), compression status, legacy status (has PAC_* tags or not)
 
+#### Scenario: View mode selector
+- **WHEN** browser is displayed
+- **THEN** a view mode selector SHALL allow switching between Source Only, With Outputs, and Outputs Only views
+
 ### Requirement: Browser Filtering
-The GUI SHALL allow filtering the browser view by file status categories.
+The GUI SHALL allow filtering the browser view by file status categories. Filters SHALL adapt based on current view mode.
 
 #### Scenario: Filter by hi-res
 - **WHEN** user selects "Hi-res only" filter
@@ -187,6 +195,10 @@ The GUI SHALL allow filtering the browser view by file status categories.
 #### Scenario: Filter by legacy
 - **WHEN** user selects "Legacy (no PAC_*)" filter
 - **THEN** the browser SHALL show only output files lacking PAC_* metadata tags
+
+#### Scenario: Filter by sync status
+- **WHEN** user selects a sync status filter in correlated view
+- **THEN** the browser SHALL show only files matching the selected sync status
 
 ### Requirement: File Selection for Operations
 The GUI SHALL allow selecting specific files or folders in the browser for targeted operations.
@@ -234,4 +246,119 @@ The GUI SHALL allow running operations on either the entire library or the curre
 #### Scenario: Run on entire library
 - **WHEN** user sets operation scope to "Entire Library" and initiates an operation
 - **THEN** the system SHALL run the operation over the full library root
+
+### Requirement: Automatic Library Scan on Path Entry
+The GUI SHALL automatically scan the library when a valid directory path is entered, without requiring a manual button click.
+
+#### Scenario: Auto-scan on typed path
+- **WHEN** user types a valid directory path in the Library root field and pauses typing
+- **THEN** the system SHALL automatically begin scanning the library after a brief debounce delay (300-500ms)
+
+#### Scenario: Auto-scan on browse dialog selection
+- **WHEN** user selects a directory via the file browser dialog
+- **THEN** the system SHALL automatically begin scanning the selected directory
+
+#### Scenario: Auto-scan on paste
+- **WHEN** user pastes a valid directory path into the Library root field
+- **THEN** the system SHALL automatically begin scanning after the debounce delay
+
+### Requirement: Debounced Path Validation
+The GUI SHALL validate path input with debouncing to avoid excessive filesystem checks or scans during typing.
+
+#### Scenario: Debounce prevents rapid scans
+- **WHEN** user is actively typing in the path field
+- **THEN** the system SHALL NOT start scanning until typing pauses for at least 300ms
+
+#### Scenario: Path validation feedback
+- **WHEN** debounce delay completes
+- **THEN** the system SHALL show visual feedback indicating whether the path is valid (exists and is a directory)
+
+### Requirement: Browser State on Path Change
+The GUI SHALL update the browser view appropriately when the library path changes or becomes invalid.
+
+#### Scenario: Path cleared
+- **WHEN** user clears the library path field
+- **THEN** the system SHALL clear the browser table and statistics
+
+#### Scenario: Invalid path entered
+- **WHEN** user enters a path that does not exist or is not a directory
+- **THEN** the system SHALL show an error indicator and NOT attempt to scan
+
+#### Scenario: Path changed during scan
+- **WHEN** user changes the path while a scan is in progress
+- **THEN** the system SHALL cancel the current scan and start a new scan for the updated path
+
+### Requirement: Manual Rescan Option
+The GUI SHALL provide a manual rescan button to refresh the library view on demand.
+
+#### Scenario: Manual rescan
+- **WHEN** user clicks the Rescan button
+- **THEN** the system SHALL re-scan the current library path regardless of cache state
+
+### Requirement: Correlated Library View
+The GUI SHALL provide a correlated view that displays source FLAC files alongside their corresponding output file status.
+
+#### Scenario: View source with output status
+- **WHEN** user selects "With Outputs" view mode and both library and mirror paths are set
+- **THEN** the browser SHALL display each source file with columns showing output sync status, codec, and quality
+
+#### Scenario: Output missing
+- **WHEN** a source file has no corresponding output in the mirror directory
+- **THEN** the system SHALL display sync status as "Missing" with visual indicator (e.g., red)
+
+#### Scenario: Output synced
+- **WHEN** a source file has a corresponding output with matching PAC_SRC_MD5
+- **THEN** the system SHALL display sync status as "Synced" with visual indicator (e.g., green)
+
+#### Scenario: Output outdated
+- **WHEN** a source file has a corresponding output but PAC_SRC_MD5 does not match source MD5
+- **THEN** the system SHALL display sync status as "Outdated" with visual indicator (e.g., yellow)
+
+### Requirement: View Mode Selection
+The GUI SHALL allow users to switch between different browser view modes.
+
+#### Scenario: Switch to source-only view
+- **WHEN** user selects "Source Only" view mode
+- **THEN** the browser SHALL display only the FLAC library analysis (current behavior)
+
+#### Scenario: Switch to correlated view
+- **WHEN** user selects "With Outputs" view mode
+- **THEN** the browser SHALL display source files with output correlation columns
+
+#### Scenario: Switch to outputs-only view
+- **WHEN** user selects "Outputs Only" view mode
+- **THEN** the browser SHALL display only the output directory contents, highlighting orphans
+
+### Requirement: Sync Status Filtering
+The GUI SHALL allow filtering the correlated view by sync status.
+
+#### Scenario: Filter to needs conversion
+- **WHEN** user selects "Needs Conversion" filter in correlated view
+- **THEN** the browser SHALL show only files with MISSING or OUTDATED sync status
+
+#### Scenario: Filter to orphaned outputs
+- **WHEN** user selects "Orphaned Outputs" filter in outputs view
+- **THEN** the browser SHALL show only output files without corresponding sources
+
+#### Scenario: Filter to synced files
+- **WHEN** user selects "Synced" filter in correlated view
+- **THEN** the browser SHALL show only files with SYNCED status
+
+### Requirement: Orphan Detection
+The GUI SHALL identify output files that have no corresponding source file (orphans).
+
+#### Scenario: Orphan output detected
+- **WHEN** an output file exists at a path with no corresponding source FLAC
+- **THEN** the system SHALL mark the output as "Orphan" in the outputs view
+
+#### Scenario: Orphan count displayed
+- **WHEN** correlated or outputs scan completes
+- **THEN** the statistics bar SHALL display the count of orphaned outputs
+
+### Requirement: Correlated Statistics
+The GUI SHALL display summary statistics for the correlated view.
+
+#### Scenario: Sync statistics shown
+- **WHEN** correlated scan completes
+- **THEN** the statistics bar SHALL show counts for: Total, Synced, Outdated, Missing, Orphans
 
