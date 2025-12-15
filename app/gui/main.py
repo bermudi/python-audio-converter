@@ -29,10 +29,16 @@ from pac.library_runner import (  # noqa: E402
 from pac.library_analyzer import (  # noqa: E402
     analyze_library,
     analyze_output_directory,
+    analyze_library_with_outputs,
+    correlate_libraries,
     AnalyzedFile,
     LibraryAnalysis,
+    CorrelatedFile,
+    CorrelatedAnalysis,
+    OutputInfo,
     FileStatus,
     IntegrityStatus,
+    SyncStatus,
 )
 from main import configure_logging, cmd_convert_dir, EXIT_OK, EXIT_WITH_FILE_ERRORS, EXIT_PREFLIGHT_FAILED  # noqa: E402
 
@@ -338,8 +344,13 @@ class AdoptWorker(QtCore.QThread):
 
 class BrowserWorker(QtCore.QThread):
     """Worker thread for scanning library for browser view."""
-    finished_with_result = QtCore.Signal(object)  # LibraryAnalysis
+    finished_with_result = QtCore.Signal(object)  # LibraryAnalysis or CorrelatedAnalysis
     progress_update = QtCore.Signal(int, int)  # current, total
+
+    # View modes
+    MODE_SOURCE_ONLY = "source_only"
+    MODE_WITH_OUTPUTS = "with_outputs"
+    MODE_OUTPUTS_ONLY = "outputs_only"
 
     def __init__(
         self,
@@ -348,18 +359,23 @@ class BrowserWorker(QtCore.QThread):
         *,
         scan_outputs: bool = False,
         output_dir: Optional[str] = None,
+        correlation_mode: str = MODE_SOURCE_ONLY,
     ) -> None:
         super().__init__()
         self.cfg = cfg
         self.root = root
         self.scan_outputs = scan_outputs
         self.output_dir = output_dir
+        self.correlation_mode = correlation_mode
         self.stop_event = threading.Event()
 
     def cancel(self) -> None:
         self.stop_event.set()
 
     def _progress_callback(self, current: int, total: int) -> None:
+        self.progress_update.emit(current, total)
+
+    def _progress_callback_phased(self, current: int, total: int, phase: str) -> None:
         self.progress_update.emit(current, total)
 
     def run(self) -> None:  # type: ignore[override]
@@ -370,14 +386,33 @@ class BrowserWorker(QtCore.QThread):
                 db_path = Path(self.cfg.db_path).expanduser()
                 db = PacDB(db_path)
 
-            if self.scan_outputs and self.output_dir:
-                analysis = analyze_output_directory(
+            if self.correlation_mode == self.MODE_WITH_OUTPUTS:
+                # Correlated view: source + output status
+                if not self.output_dir:
+                    logger.error("Correlated mode requires output_dir")
+                    self.finished_with_result.emit(None)
+                    return
+                
+                analysis = analyze_library_with_outputs(
+                    Path(self.root),
                     Path(self.output_dir),
+                    self.cfg,
+                    db=db,
+                    stop_event=self.stop_event,
+                    progress_callback=self._progress_callback_phased,
+                )
+                self.finished_with_result.emit(analysis)
+            elif self.correlation_mode == self.MODE_OUTPUTS_ONLY or (self.scan_outputs and self.output_dir):
+                # Outputs only view
+                analysis = analyze_output_directory(
+                    Path(self.output_dir) if self.output_dir else Path(self.root),
                     source_root=Path(self.root) if self.root else None,
                     stop_event=self.stop_event,
                     progress_callback=self._progress_callback,
                 )
+                self.finished_with_result.emit(analysis)
             else:
+                # Source only view (default)
                 analysis = analyze_library(
                     Path(self.root),
                     self.cfg,
@@ -385,7 +420,7 @@ class BrowserWorker(QtCore.QThread):
                     stop_event=self.stop_event,
                     progress_callback=self._progress_callback,
                 )
-            self.finished_with_result.emit(analysis)
+                self.finished_with_result.emit(analysis)
         except Exception as e:
             logger.error(f"Browser scan failed: {e}")
             self.finished_with_result.emit(None)
@@ -510,6 +545,135 @@ class LibraryTableModel(QtCore.QAbstractTableModel):
         return None
     
     def get_selected_files(self, indexes) -> List[AnalyzedFile]:
+        rows = set(idx.row() for idx in indexes)
+        return [self._filtered_files[r] for r in rows if 0 <= r < len(self._filtered_files)]
+
+
+class CorrelatedTableModel(QtCore.QAbstractTableModel):
+    """Table model for displaying correlated source↔output files."""
+    
+    COLUMNS = ["Path", "Sync Status", "Source Status", "Output Codec", "Output Quality", "Output Size"]
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._files: List[CorrelatedFile] = []
+        self._filtered_files: List[CorrelatedFile] = []
+        self._filter_sync_status: Optional[SyncStatus] = None
+        self._filter_needs_conversion: bool = False
+        self._filter_orphans: bool = False
+        self._filter_synced: bool = False
+    
+    def set_files(self, files: List[CorrelatedFile]) -> None:
+        self.beginResetModel()
+        self._files = files
+        self._apply_filters()
+        self.endResetModel()
+    
+    def set_filter(
+        self,
+        sync_status: Optional[SyncStatus] = None,
+        needs_conversion: bool = False,
+        orphans: bool = False,
+        synced: bool = False,
+    ) -> None:
+        self.beginResetModel()
+        self._filter_sync_status = sync_status
+        self._filter_needs_conversion = needs_conversion
+        self._filter_orphans = orphans
+        self._filter_synced = synced
+        self._apply_filters()
+        self.endResetModel()
+    
+    def clear_filters(self) -> None:
+        self.set_filter()
+    
+    def _apply_filters(self) -> None:
+        self._filtered_files = []
+        for f in self._files:
+            if self._filter_sync_status and f.sync_status != self._filter_sync_status:
+                continue
+            if self._filter_needs_conversion and f.sync_status not in (SyncStatus.MISSING, SyncStatus.OUTDATED):
+                continue
+            if self._filter_orphans and f.sync_status != SyncStatus.ORPHAN:
+                continue
+            if self._filter_synced and f.sync_status != SyncStatus.SYNCED:
+                continue
+            self._filtered_files.append(f)
+    
+    def rowCount(self, parent=None) -> int:
+        return len(self._filtered_files)
+    
+    def columnCount(self, parent=None) -> int:
+        return len(self.COLUMNS)
+    
+    def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
+        if role == QtCore.Qt.DisplayRole and orientation == QtCore.Qt.Horizontal:
+            return self.COLUMNS[section]
+        return None
+    
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._filtered_files):
+            return None
+        
+        cf = self._filtered_files[index.row()]
+        col = index.column()
+        
+        if role == QtCore.Qt.DisplayRole:
+            if col == 0:  # Path
+                return cf.display_path
+            elif col == 1:  # Sync Status
+                return cf.sync_status.value.title()
+            elif col == 2:  # Source Status
+                if cf.source:
+                    return cf.source.overall_status.value.title()
+                return "-"
+            elif col == 3:  # Output Codec
+                if cf.output:
+                    return cf.output.codec.upper() if cf.output.codec else "-"
+                return "-"
+            elif col == 4:  # Output Quality
+                if cf.output and cf.output.quality:
+                    return cf.output.quality
+                return "-"
+            elif col == 5:  # Output Size
+                if cf.output:
+                    return f"{cf.output.size / 1024 / 1024:.1f} MB"
+                return "-"
+        
+        elif role == QtCore.Qt.ForegroundRole:
+            # Color coding for sync status
+            if cf.sync_status == SyncStatus.SYNCED:
+                return QtCore.Qt.darkGreen
+            elif cf.sync_status == SyncStatus.OUTDATED:
+                return QtCore.Qt.darkYellow
+            elif cf.sync_status == SyncStatus.MISSING:
+                return QtCore.Qt.red
+            elif cf.sync_status == SyncStatus.ORPHAN:
+                return QtCore.Qt.darkMagenta
+        
+        elif role == QtCore.Qt.ToolTipRole:
+            tips = [f"Sync: {cf.sync_status.value}"]
+            if cf.source:
+                tips.append(f"Source: {cf.source.rel_path}")
+                if cf.source.flac_md5:
+                    tips.append(f"Source MD5: {cf.source.flac_md5[:8]}...")
+            if cf.output:
+                tips.append(f"Output: {cf.output.rel_path}")
+                if cf.output.pac_src_md5:
+                    tips.append(f"PAC_SRC_MD5: {cf.output.pac_src_md5[:8]}...")
+            return "\n".join(tips)
+        
+        elif role == QtCore.Qt.UserRole:
+            return cf  # Return the full CorrelatedFile for selection handling
+        
+        return None
+    
+    def get_file_at(self, row: int) -> Optional[CorrelatedFile]:
+        if 0 <= row < len(self._filtered_files):
+            return self._filtered_files[row]
+        return None
+    
+    def get_selected_files(self, indexes) -> List[CorrelatedFile]:
         rows = set(idx.row() for idx in indexes)
         return [self._filtered_files[r] for r in rows if 0 <= r < len(self._filtered_files)]
 
@@ -1018,8 +1182,14 @@ class MainWindow(QtWidgets.QMainWindow):
         stats_bar.addStretch(1)
         browser_layout.addLayout(stats_bar)
         
-        # Filter + Scan row
+        # View mode + Filter + Scan row
         filter_row = QtWidgets.QHBoxLayout()
+        filter_row.addWidget(QtWidgets.QLabel("View:"))
+        self.combo_view_mode = QtWidgets.QComboBox()
+        self.combo_view_mode.addItems(["Source Only", "With Outputs", "Outputs Only"])
+        self.combo_view_mode.setToolTip("Source Only: FLAC library\nWith Outputs: Correlated view\nOutputs Only: Mirror directory")
+        filter_row.addWidget(self.combo_view_mode)
+        
         filter_row.addWidget(QtWidgets.QLabel("Filter:"))
         self.combo_browser_filter = QtWidgets.QComboBox()
         self.combo_browser_filter.addItems([
@@ -1032,8 +1202,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browser_clear_filter.setFixedWidth(50)
         filter_row.addWidget(self.btn_browser_clear_filter)
         filter_row.addStretch(1)
-        self.btn_browser_scan = QtWidgets.QPushButton("Scan Library")
-        self.btn_browser_scan.setToolTip("Scan library (non-destructive)")
+        self.btn_browser_scan = QtWidgets.QPushButton("Rescan")
+        self.btn_browser_scan.setToolTip("Rescan library (non-destructive)")
         filter_row.addWidget(self.btn_browser_scan)
         browser_layout.addLayout(filter_row)
         
@@ -1048,9 +1218,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.browser_table.verticalHeader().setVisible(False)
         
         self.browser_model = LibraryTableModel(self)
+        self.correlated_model = CorrelatedTableModel(self)
         self.browser_proxy_model = QtCore.QSortFilterProxyModel(self)
         self.browser_proxy_model.setSourceModel(self.browser_model)
         self.browser_table.setModel(self.browser_proxy_model)
+        
+        # Track current view mode
+        self._current_view_mode = "Source Only"
         
         browser_layout.addWidget(self.browser_table, 1)
         
@@ -1128,9 +1302,20 @@ class MainWindow(QtWidgets.QMainWindow):
         
         layout.addWidget(self.details_widget)
 
+        # === AUTO-SCAN SETUP ===
+        # Debounce timer for path validation
+        self._lib_path_debounce_timer = QtCore.QTimer(self)
+        self._lib_path_debounce_timer.setSingleShot(True)
+        self._lib_path_debounce_timer.setInterval(400)  # 400ms debounce
+        self._lib_path_debounce_timer.timeout.connect(self._on_lib_path_debounce_timeout)
+        
+        # Track last validated path to avoid redundant scans
+        self._last_scanned_lib_path = ""
+        
         # === CONNECT SIGNALS ===
         # Top bar
-        self.btn_lib_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_root))
+        self.btn_lib_root.clicked.connect(self._on_lib_root_browse)
+        self.edit_lib_root.textChanged.connect(self._on_lib_path_changed)
         self.btn_mirror_out.clicked.connect(lambda: self._pick_dir(self.edit_mirror_out))
         self.btn_lib_settings.clicked.connect(self._on_lib_settings)
         
@@ -1142,6 +1327,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Browser
         self.btn_browser_scan.clicked.connect(self.on_browser_scan)
+        self.combo_view_mode.currentTextChanged.connect(self._on_view_mode_change)
         self.combo_browser_filter.currentTextChanged.connect(self._on_browser_filter_change)
         self.btn_browser_clear_filter.clicked.connect(self._on_browser_clear_filter)
         self.browser_table.selectionModel().selectionChanged.connect(self._on_browser_selection_changed)
@@ -1486,7 +1672,125 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_mirror_dependent_ops()
         self._apply_encoder_ui()
 
+    # Auto-scan methods
+    def _on_lib_root_browse(self) -> None:
+        """Handle browse button for library root - triggers immediate scan on selection."""
+        start = self.edit_lib_root.text() or str(Path.home())
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select FLAC Library Root", start)
+        if d:
+            self.edit_lib_root.setText(d)
+            # File dialog selection should trigger immediate scan (bypass debounce)
+            self._trigger_auto_scan(d)
+
+    def _on_lib_path_changed(self, text: str) -> None:
+        """Handle library path text change - starts debounce timer."""
+        # Stop any pending debounce
+        self._lib_path_debounce_timer.stop()
+        
+        path = text.strip()
+        if not path:
+            # Path cleared - clear browser
+            self._clear_browser()
+            self._update_path_validation_indicator(None)
+            return
+        
+        # Start debounce timer
+        self._lib_path_debounce_timer.start()
+
+    def _on_lib_path_debounce_timeout(self) -> None:
+        """Called after debounce period - validate and auto-scan if valid."""
+        path = self.edit_lib_root.text().strip()
+        if not path:
+            return
+        
+        # Validate path
+        path_obj = Path(path)
+        if path_obj.exists() and path_obj.is_dir():
+            self._update_path_validation_indicator(True)
+            self._trigger_auto_scan(path)
+        else:
+            self._update_path_validation_indicator(False)
+            self._clear_browser()
+
+    def _trigger_auto_scan(self, path: str) -> None:
+        """Trigger automatic scan if path changed since last scan."""
+        if path == self._last_scanned_lib_path:
+            return  # Already scanned this path
+        
+        # Cancel any in-progress scan
+        if hasattr(self, 'browser_worker') and self.browser_worker.isRunning():
+            self.browser_worker.cancel()
+            self.browser_worker.wait(500)  # Wait up to 500ms for cancellation
+        
+        self._last_scanned_lib_path = path
+        self.on_browser_scan()
+
+    def _update_path_validation_indicator(self, valid: Optional[bool]) -> None:
+        """Update visual indicator for path validation status."""
+        if valid is None:
+            # Clear state
+            self.edit_lib_root.setStyleSheet("")
+            self.edit_lib_root.setToolTip("FLAC library root")
+        elif valid:
+            # Valid path - green border
+            self.edit_lib_root.setStyleSheet("border: 1px solid green;")
+            self.edit_lib_root.setToolTip("Valid directory")
+        else:
+            # Invalid path - red border
+            self.edit_lib_root.setStyleSheet("border: 1px solid red;")
+            self.edit_lib_root.setToolTip("Directory does not exist")
+
+    def _clear_browser(self) -> None:
+        """Clear browser table and statistics."""
+        self.browser_model.set_files([])
+        self.correlated_model.set_files([])
+        self._last_scanned_lib_path = ""
+        
+        # Reset statistics
+        self.btn_stat_total.setText("Total: 0")
+        self.btn_stat_hires.setText("Hi-Res: 0")
+        self.btn_stat_integrity_unknown.setText("Untested: 0")
+        self.btn_stat_integrity_failed.setText("Failed: 0")
+        self.btn_stat_needs_recompress.setText("Needs Recompress: 0")
+        self.btn_stat_legacy.setText("Legacy: 0")
+
     # Browser methods
+    def _on_view_mode_change(self, mode: str) -> None:
+        """Handle view mode change."""
+        self._current_view_mode = mode
+        
+        # Update filter options based on view mode
+        self.combo_browser_filter.blockSignals(True)
+        self.combo_browser_filter.clear()
+        
+        if mode == "With Outputs":
+            self.combo_browser_filter.addItems([
+                "All Files", "Needs Conversion", "Synced", "Outdated", "Missing", "Orphaned Outputs",
+            ])
+        elif mode == "Outputs Only":
+            self.combo_browser_filter.addItems([
+                "All Files", "Legacy (No PAC tags)", "Orphaned Outputs",
+            ])
+        else:  # Source Only
+            self.combo_browser_filter.addItems([
+                "All Files", "Needs Action", "Hi-Res Only",
+                "Integrity Unknown", "Integrity Failed",
+                "Needs Recompress", "Legacy (No PAC tags)",
+            ])
+        
+        self.combo_browser_filter.blockSignals(False)
+        
+        # Swap table model based on view mode
+        if mode == "With Outputs":
+            self.browser_proxy_model.setSourceModel(self.correlated_model)
+        else:
+            self.browser_proxy_model.setSourceModel(self.browser_model)
+        
+        # Trigger rescan if we have a valid path
+        lib_root = self.edit_lib_root.text().strip()
+        if lib_root and Path(lib_root).exists():
+            self.on_browser_scan()
+
     def on_browser_scan(self) -> None:
         """Start browser scan of library."""
         lib_root = self.edit_lib_root.text().strip()
@@ -1497,7 +1801,33 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         
-        logger.info(f"Starting browser scan of {lib_root}")
+        # Check if correlated mode requires mirror path
+        mirror_out = self.edit_mirror_out.text().strip()
+        view_mode = self.combo_view_mode.currentText()
+        
+        if view_mode == "With Outputs" and (not mirror_out or not Path(mirror_out).exists()):
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Mirror Output",
+                "Correlated view requires a valid Mirror output directory"
+            )
+            return
+        
+        if view_mode == "Outputs Only" and (not mirror_out or not Path(mirror_out).exists()):
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Mirror Output",
+                "Outputs Only view requires a valid Mirror output directory"
+            )
+            return
+        
+        # Map view mode to correlation mode
+        if view_mode == "With Outputs":
+            correlation_mode = BrowserWorker.MODE_WITH_OUTPUTS
+        elif view_mode == "Outputs Only":
+            correlation_mode = BrowserWorker.MODE_OUTPUTS_ONLY
+        else:
+            correlation_mode = BrowserWorker.MODE_SOURCE_ONLY
+        
+        logger.info(f"Starting browser scan of {lib_root} (mode: {view_mode})")
         self.btn_browser_scan.setEnabled(False)
         self.btn_browser_scan.setText("Scanning...")
         self.progress.show()
@@ -1506,6 +1836,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.browser_worker = BrowserWorker(
             cfg=self.settings,
             root=lib_root,
+            output_dir=mirror_out if mirror_out else None,
+            correlation_mode=correlation_mode,
         )
         self.browser_worker.progress_update.connect(self._on_browser_progress)
         self.browser_worker.finished_with_result.connect(self._on_browser_scan_complete)
@@ -1516,10 +1848,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if total > 0:
             self.lbl_lib_current_op.setText(f"Scanning: {current}/{total}")
 
-    def _on_browser_scan_complete(self, analysis: LibraryAnalysis) -> None:
+    def _on_browser_scan_complete(self, analysis) -> None:
         """Handle browser scan completion."""
         self.btn_browser_scan.setEnabled(True)
-        self.btn_browser_scan.setText("Scan Library")
+        self.btn_browser_scan.setText("Rescan")
         self.progress.hide()
         self.lbl_lib_current_op.setText("")
         
@@ -1527,16 +1859,28 @@ class MainWindow(QtWidgets.QMainWindow):
             logger.error("Browser scan failed")
             return
         
-        logger.info(f"Browser scan complete: {analysis.total_files} files")
-        
         # Store analysis for later use
         self._current_analysis = analysis
         
-        # Update table model
-        self.browser_model.set_files(analysis.files)
-        
-        # Update statistics
-        self._update_browser_statistics(analysis)
+        # Handle different analysis types
+        if isinstance(analysis, CorrelatedAnalysis):
+            logger.info(f"Correlated scan complete: {len(analysis.files)} files "
+                       f"({analysis.synced_count} synced, {analysis.missing_count} missing)")
+            
+            # Update correlated table model
+            self.correlated_model.set_files(analysis.files)
+            
+            # Update statistics for correlated view
+            self._update_correlated_statistics(analysis)
+        else:
+            # LibraryAnalysis
+            logger.info(f"Browser scan complete: {analysis.total_files} files")
+            
+            # Update table model
+            self.browser_model.set_files(analysis.files)
+            
+            # Update statistics
+            self._update_browser_statistics(analysis)
         
         # Resize columns to content
         self.browser_table.resizeColumnsToContents()
@@ -1549,28 +1893,81 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stat_integrity_failed.setText(f"Failed: {analysis.integrity_failed_count}")
         self.btn_stat_needs_recompress.setText(f"Needs Recompress: {analysis.needs_recompress_count}")
         self.btn_stat_legacy.setText(f"Legacy: {analysis.legacy_count}")
+        
+        # Show all stat buttons for source view
+        self.btn_stat_hires.show()
+        self.btn_stat_integrity_unknown.show()
+        self.btn_stat_integrity_failed.show()
+        self.btn_stat_needs_recompress.show()
+        self.btn_stat_legacy.show()
+
+    def _update_correlated_statistics(self, analysis: CorrelatedAnalysis) -> None:
+        """Update the statistics bar for correlated view."""
+        total = len(analysis.files)
+        self.btn_stat_total.setText(f"Total: {total}")
+        self.btn_stat_hires.setText(f"Synced: {analysis.synced_count}")
+        self.btn_stat_integrity_unknown.setText(f"Outdated: {analysis.outdated_count}")
+        self.btn_stat_integrity_failed.setText(f"Missing: {analysis.missing_count}")
+        self.btn_stat_needs_recompress.setText(f"Orphan: {analysis.orphan_count}")
+        
+        # Hide legacy button in correlated view, repurpose others
+        self.btn_stat_legacy.hide()
+        self.btn_stat_hires.show()
+        self.btn_stat_integrity_unknown.show()
+        self.btn_stat_integrity_failed.show()
+        self.btn_stat_needs_recompress.show()
+        
+        # Update tooltips for repurposed buttons
+        self.btn_stat_hires.setToolTip("Filter synced files")
+        self.btn_stat_integrity_unknown.setToolTip("Filter outdated files")
+        self.btn_stat_integrity_failed.setToolTip("Filter missing files")
+        self.btn_stat_needs_recompress.setToolTip("Filter orphaned outputs")
 
     def _on_browser_filter_change(self, filter_text: str) -> None:
         """Handle filter combobox change."""
-        if filter_text == "All Files":
-            self.browser_model.clear_filters()
-        elif filter_text == "Needs Action":
-            self.browser_model.set_filter(needs_action=True)
-        elif filter_text == "Hi-Res Only":
-            self.browser_model.set_filter(hires=True)
-        elif filter_text == "Integrity Unknown":
-            self.browser_model.set_filter(integrity=IntegrityStatus.NEVER_TESTED)
-        elif filter_text == "Integrity Failed":
-            self.browser_model.set_filter(integrity=IntegrityStatus.FAILED)
-        elif filter_text == "Needs Recompress":
-            self.browser_model.set_filter(status=FileStatus.NEEDS_ACTION)
-        elif filter_text == "Legacy (No PAC tags)":
-            self.browser_model.set_filter(legacy=True)
+        view_mode = self._current_view_mode
+        
+        if view_mode == "With Outputs":
+            # Correlated view filters
+            if filter_text == "All Files":
+                self.correlated_model.clear_filters()
+            elif filter_text == "Needs Conversion":
+                self.correlated_model.set_filter(needs_conversion=True)
+            elif filter_text == "Synced":
+                self.correlated_model.set_filter(synced=True)
+            elif filter_text == "Outdated":
+                self.correlated_model.set_filter(sync_status=SyncStatus.OUTDATED)
+            elif filter_text == "Missing":
+                self.correlated_model.set_filter(sync_status=SyncStatus.MISSING)
+            elif filter_text == "Orphaned Outputs":
+                self.correlated_model.set_filter(orphans=True)
+        else:
+            # Source view filters (also used for Outputs Only)
+            if filter_text == "All Files":
+                self.browser_model.clear_filters()
+            elif filter_text == "Needs Action":
+                self.browser_model.set_filter(needs_action=True)
+            elif filter_text == "Hi-Res Only":
+                self.browser_model.set_filter(hires=True)
+            elif filter_text == "Integrity Unknown":
+                self.browser_model.set_filter(integrity=IntegrityStatus.NEVER_TESTED)
+            elif filter_text == "Integrity Failed":
+                self.browser_model.set_filter(integrity=IntegrityStatus.FAILED)
+            elif filter_text == "Needs Recompress":
+                self.browser_model.set_filter(status=FileStatus.NEEDS_ACTION)
+            elif filter_text == "Legacy (No PAC tags)":
+                self.browser_model.set_filter(legacy=True)
+            elif filter_text == "Orphaned Outputs":
+                # For Outputs Only view - filter legacy files which are orphans
+                self.browser_model.set_filter(legacy=True)
 
     def _on_browser_clear_filter(self) -> None:
         """Clear browser filters."""
         self.combo_browser_filter.setCurrentText("All Files")
-        self.browser_model.clear_filters()
+        if self._current_view_mode == "With Outputs":
+            self.correlated_model.clear_filters()
+        else:
+            self.browser_model.clear_filters()
 
     def _on_browser_selection_changed(self) -> None:
         """Handle browser table selection changes."""
