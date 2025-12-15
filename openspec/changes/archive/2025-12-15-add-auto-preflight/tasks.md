@@ -14,6 +14,6 @@
 
 ## 3. Testing
 
-- [ ] 3.1 Manual test: GUI starts and auto-enables Convert controls when ffmpeg available
-- [ ] 3.2 Manual test: GUI shows error state gracefully when no encoder found
-- [ ] 3.3 Manual test: Re-check option works after initial preflight
+- [x] 3.1 Manual test: GUI starts and auto-enables Convert controls when ffmpeg available
+- [x] 3.2 Manual test: GUI shows error state gracefully when no encoder found
+- [x] 3.3 Manual test: Re-check option works after initial preflight

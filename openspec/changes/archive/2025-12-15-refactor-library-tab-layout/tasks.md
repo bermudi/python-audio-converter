@@ -15,6 +15,6 @@
 - [x] 4.3 Ensure selection-based operations remain available from the browser selection actions/context menu
 
 ## 5. Validation
-- [ ] 5.1 Manual validation: Library browser table remains usable at typical window size (no excessive scrolling above it)
-- [ ] 5.2 Manual validation: operations run successfully on Entire Library and on Selection
-- [ ] 5.3 Manual validation: settings dialog updates effective configuration and does not regress existing defaults
+- [x] 5.1 Manual validation: Library browser table remains usable at typical window size (no excessive scrolling above it)
+- [x] 5.2 Manual validation: operations run successfully on Entire Library and on Selection
+- [x] 5.3 Manual validation: settings dialog updates effective configuration and does not regress existing defaults
