@@ -19,7 +19,13 @@ if str(ROOT) not in sys.path:
 # Import project modules after adjusting sys.path
 from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
 from pac.config import PacSettings  # noqa: E402
-from pac.library_runner import cmd_manage_library  # noqa: E402
+from pac.library_runner import (  # noqa: E402
+    cmd_manage_library,
+    scan_adoptable_files,
+    execute_adopt_phase,
+    PHASE_SCAN, PHASE_INTEGRITY, PHASE_RESAMPLE, PHASE_RECOMPRESS, PHASE_ARTWORK, PHASE_ADOPT, PHASE_MIRROR,
+    ALL_PHASES,
+)
 from main import configure_logging, cmd_convert_dir, EXIT_OK, EXIT_WITH_FILE_ERRORS, EXIT_PREFLIGHT_FAILED  # noqa: E402
 
 
@@ -198,6 +204,7 @@ class ConvertWorker(QtCore.QThread):
 class LibraryWorker(QtCore.QThread):
     finished_with_code = QtCore.Signal(int)
     summary_ready = QtCore.Signal(dict)
+    progress_update = QtCore.Signal(str, int, int)  # phase_name, current, total
 
     def __init__(
         self,
@@ -206,6 +213,7 @@ class LibraryWorker(QtCore.QThread):
         *,
         mirror_out: Optional[str] = None,
         dry_run: bool = False,
+        phases: Optional[set] = None,
         **kwargs
     ) -> None:
         super().__init__()
@@ -213,6 +221,7 @@ class LibraryWorker(QtCore.QThread):
         self.root = root
         self.mirror_out = mirror_out
         self.dry_run = dry_run
+        self.phases = phases
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.pause_event.set()  # Not paused initially
@@ -226,6 +235,9 @@ class LibraryWorker(QtCore.QThread):
         else:
             self.pause_event.set()
 
+    def _progress_callback(self, phase: str, current: int, total: int) -> None:
+        self.progress_update.emit(phase, current, total)
+
     def run(self) -> None:  # type: ignore[override]
         try:
             exit_code, summary = cmd_manage_library(
@@ -233,13 +245,68 @@ class LibraryWorker(QtCore.QThread):
                 self.root,
                 mirror_out=self.mirror_out,
                 dry_run=self.dry_run,
+                phases=self.phases,
                 stop_event=self.stop_event,
                 pause_event=self.pause_event,
+                progress_callback=self._progress_callback,
             )
             self.summary_ready.emit(summary)
             self.finished_with_code.emit(exit_code)
         except Exception as e:
             logger.error(f"Library operation failed: {e}")
+            self.finished_with_code.emit(1)
+
+
+class AdoptWorker(QtCore.QThread):
+    """Worker thread for adopting legacy files without PAC_* tags."""
+    finished_with_code = QtCore.Signal(int)
+    summary_ready = QtCore.Signal(dict)
+    progress_update = QtCore.Signal(str, int, int)  # phase_name, current, total
+
+    def __init__(
+        self,
+        cfg: PacSettings,
+        output_dir: str,
+        source_dir: str,
+        *,
+        dry_run: bool = False,
+    ) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.output_dir = output_dir
+        self.source_dir = source_dir
+        self.dry_run = dry_run
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()
+
+    def cancel(self) -> None:
+        self.stop_event.set()
+
+    def toggle_pause(self) -> None:
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+        else:
+            self.pause_event.set()
+
+    def _progress_callback(self, phase: str, current: int, total: int) -> None:
+        self.progress_update.emit(phase, current, total)
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            summary = execute_adopt_phase(
+                Path(self.output_dir),
+                Path(self.source_dir),
+                self.cfg,
+                dry_run=self.dry_run,
+                stop_event=self.stop_event,
+                pause_event=self.pause_event,
+                progress_callback=self._progress_callback,
+            )
+            self.summary_ready.emit(summary)
+            self.finished_with_code.emit(0 if summary.get("failed", 0) == 0 else 1)
+        except Exception as e:
+            logger.error(f"Adopt operation failed: {e}")
             self.finished_with_code.emit(1)
 
 
@@ -263,15 +330,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         outer.addWidget(self.tabs, 1)
 
+        # Library tab (main tab)
+        self.library_tab = QtWidgets.QWidget()
+        self.tabs.addTab(self.library_tab, "Library")
+        self._setup_library_tab()
+
         # Convert tab
         self.convert_tab = QtWidgets.QWidget()
         self.tabs.addTab(self.convert_tab, "Convert")
         self._setup_convert_tab()
-
-        # Library tab
-        self.library_tab = QtWidgets.QWidget()
-        self.tabs.addTab(self.library_tab, "Library")
-        self._setup_library_tab()
 
         # Shared components
         self._setup_shared_components(outer)
@@ -448,7 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return box
 
     def _setup_library_tab(self) -> None:
-        """Setup the library management tab."""
+        """Setup the library management tab with granular operation controls."""
         layout = QtWidgets.QVBoxLayout(self.library_tab)
 
         # Library path selector
@@ -471,6 +538,83 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Mirror Output:", self._wrap_row(mirror_row))
         layout.addLayout(form)
 
+        # Operations group - granular control
+        ops_group = QtWidgets.QGroupBox("Operations")
+        ops_layout = QtWidgets.QVBoxLayout(ops_group)
+        
+        # Dry run toggle
+        self.chk_lib_dry_run = QtWidgets.QCheckBox("Dry Run (plan only, no changes)")
+        self.chk_lib_dry_run.setChecked(False)
+        ops_layout.addWidget(self.chk_lib_dry_run)
+        
+        # Operations grid with checkboxes and individual run buttons
+        ops_grid = QtWidgets.QGridLayout()
+        
+        # Integrity check
+        self.chk_op_integrity = QtWidgets.QCheckBox("Integrity Check")
+        self.chk_op_integrity.setChecked(True)
+        self.chk_op_integrity.setToolTip("Test FLAC files for corruption")
+        self.btn_run_integrity = QtWidgets.QPushButton("Run")
+        self.btn_run_integrity.setFixedWidth(60)
+        self.btn_run_integrity.setToolTip("Run integrity check only")
+        ops_grid.addWidget(self.chk_op_integrity, 0, 0)
+        ops_grid.addWidget(self.btn_run_integrity, 0, 1)
+        
+        # Resample
+        self.chk_op_resample = QtWidgets.QCheckBox("Resample to CD")
+        self.chk_op_resample.setChecked(self.settings.flac_resample_to_cd)
+        self.chk_op_resample.setToolTip("Resample hi-res files to 16-bit/44.1kHz")
+        self.btn_run_resample = QtWidgets.QPushButton("Run")
+        self.btn_run_resample.setFixedWidth(60)
+        self.btn_run_resample.setToolTip("Run resample only")
+        ops_grid.addWidget(self.chk_op_resample, 1, 0)
+        ops_grid.addWidget(self.btn_run_resample, 1, 1)
+        
+        # Recompress
+        self.chk_op_recompress = QtWidgets.QCheckBox("Recompress FLAC")
+        self.chk_op_recompress.setChecked(True)
+        self.chk_op_recompress.setToolTip("Recompress FLAC files to target compression level")
+        self.btn_run_recompress = QtWidgets.QPushButton("Run")
+        self.btn_run_recompress.setFixedWidth(60)
+        self.btn_run_recompress.setToolTip("Run recompress only")
+        ops_grid.addWidget(self.chk_op_recompress, 2, 0)
+        ops_grid.addWidget(self.btn_run_recompress, 2, 1)
+        
+        # Artwork extraction
+        self.chk_op_artwork = QtWidgets.QCheckBox("Extract Artwork")
+        self.chk_op_artwork.setChecked(True)
+        self.chk_op_artwork.setToolTip("Extract embedded artwork to files")
+        self.btn_run_artwork = QtWidgets.QPushButton("Run")
+        self.btn_run_artwork.setFixedWidth(60)
+        self.btn_run_artwork.setToolTip("Run artwork extraction only")
+        ops_grid.addWidget(self.chk_op_artwork, 3, 0)
+        ops_grid.addWidget(self.btn_run_artwork, 3, 1)
+        
+        # Adopt legacy files
+        self.chk_op_adopt = QtWidgets.QCheckBox("Adopt Legacy Files")
+        self.chk_op_adopt.setChecked(False)
+        self.chk_op_adopt.setToolTip("Add PAC_* tags to outputs without them (requires Mirror Output)")
+        self.btn_run_adopt = QtWidgets.QPushButton("Run")
+        self.btn_run_adopt.setFixedWidth(60)
+        self.btn_run_adopt.setToolTip("Run adopt legacy files only")
+        self.lbl_adoptable_count = QtWidgets.QLabel("")
+        ops_grid.addWidget(self.chk_op_adopt, 4, 0)
+        ops_grid.addWidget(self.btn_run_adopt, 4, 1)
+        ops_grid.addWidget(self.lbl_adoptable_count, 4, 2)
+        
+        # Mirror update (depends on mirror output being set)
+        self.chk_op_mirror = QtWidgets.QCheckBox("Update Mirror")
+        self.chk_op_mirror.setChecked(False)
+        self.chk_op_mirror.setToolTip("Update lossy mirror after maintenance (requires Mirror Output)")
+        self.btn_run_mirror = QtWidgets.QPushButton("Run")
+        self.btn_run_mirror.setFixedWidth(60)
+        self.btn_run_mirror.setToolTip("Run mirror update only")
+        ops_grid.addWidget(self.chk_op_mirror, 5, 0)
+        ops_grid.addWidget(self.btn_run_mirror, 5, 1)
+        
+        ops_layout.addLayout(ops_grid)
+        layout.addWidget(ops_group)
+
         # Library settings
         settings_group = QtWidgets.QGroupBox("Library Settings")
         settings_layout = QtWidgets.QVBoxLayout(settings_group)
@@ -485,14 +629,6 @@ class MainWindow(QtWidgets.QMainWindow):
         comp_layout.addWidget(self.spin_lib_compression)
         comp_layout.addStretch(1)
         settings_layout.addLayout(comp_layout)
-
-        # Resample setting
-        resample_layout = QtWidgets.QHBoxLayout()
-        self.chk_lib_resample = QtWidgets.QCheckBox("Resample hi-res to CD quality")
-        self.chk_lib_resample.setChecked(self.settings.flac_resample_to_cd)
-        resample_layout.addWidget(self.chk_lib_resample)
-        resample_layout.addStretch(1)
-        settings_layout.addLayout(resample_layout)
     
         # Artwork settings
         art_layout = QtWidgets.QFormLayout()
@@ -556,6 +692,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_lib_resampled = QtWidgets.QLabel("Resampled: 0")
         self.lbl_lib_recompressed = QtWidgets.QLabel("Recompressed: 0")
         self.lbl_lib_art_exported = QtWidgets.QLabel("Artwork Exported: 0")
+        self.lbl_lib_adopted = QtWidgets.QLabel("Adopted: 0")
         self.lbl_lib_held = QtWidgets.QLabel("Held: 0")
     
         status_layout.addWidget(self.lbl_lib_scanned, 0, 0)
@@ -564,9 +701,14 @@ class MainWindow(QtWidgets.QMainWindow):
         status_layout.addWidget(self.lbl_lib_resampled, 1, 0)
         status_layout.addWidget(self.lbl_lib_recompressed, 1, 1)
         status_layout.addWidget(self.lbl_lib_art_exported, 1, 2)
+        status_layout.addWidget(self.lbl_lib_adopted, 2, 0)
         status_layout.addWidget(self.lbl_lib_held, 2, 2)
     
         counters_layout.addLayout(status_layout)
+        
+        # Current operation progress
+        self.lbl_lib_current_op = QtWidgets.QLabel("")
+        counters_layout.addWidget(self.lbl_lib_current_op)
     
         # Issues panel
         issues_group = QtWidgets.QGroupBox("Issues")
@@ -578,15 +720,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Action buttons
         actions = QtWidgets.QHBoxLayout()
-        self.btn_lib_plan = QtWidgets.QPushButton("Plan Library")
-        self.btn_lib_run = QtWidgets.QPushButton("Run Library Maintenance")
+        self.btn_lib_scan_adoptable = QtWidgets.QPushButton("Scan Adoptable")
+        self.btn_lib_scan_adoptable.setToolTip("Scan mirror output for files without PAC_* tags")
+        self.btn_lib_run = QtWidgets.QPushButton("Run Selected")
+        self.btn_lib_run.setToolTip("Run all checked operations")
         self.btn_lib_cancel = QtWidgets.QPushButton("Cancel")
         self.btn_lib_cancel.hide()
         self.btn_lib_pause = QtWidgets.QPushButton("Pause")
         self.btn_lib_pause.hide()
 
         actions.addStretch(1)
-        actions.addWidget(self.btn_lib_plan)
+        actions.addWidget(self.btn_lib_scan_adoptable)
         actions.addWidget(self.btn_lib_run)
         actions.addWidget(self.btn_lib_pause)
         actions.addWidget(self.btn_lib_cancel)
@@ -596,37 +740,132 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_lib_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_root))
         self.btn_lib_art_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_art_root))
         self.btn_mirror_out.clicked.connect(lambda: self._pick_dir(self.edit_mirror_out))
-        self.btn_lib_plan.clicked.connect(self.on_lib_plan)
         self.btn_lib_run.clicked.connect(self.on_lib_run)
         self.btn_lib_cancel.clicked.connect(self.on_lib_cancel)
         self.btn_lib_pause.clicked.connect(self.on_lib_pause_resume)
+        self.btn_lib_scan_adoptable.clicked.connect(self.on_scan_adoptable)
+        
+        # Connect individual operation run buttons
+        self.btn_run_integrity.clicked.connect(lambda: self._run_single_op(PHASE_INTEGRITY))
+        self.btn_run_resample.clicked.connect(lambda: self._run_single_op(PHASE_RESAMPLE))
+        self.btn_run_recompress.clicked.connect(lambda: self._run_single_op(PHASE_RECOMPRESS))
+        self.btn_run_artwork.clicked.connect(lambda: self._run_single_op(PHASE_ARTWORK))
+        self.btn_run_adopt.clicked.connect(lambda: self._run_single_op(PHASE_ADOPT))
+        self.btn_run_mirror.clicked.connect(lambda: self._run_single_op(PHASE_MIRROR))
+        
+        # Enable/disable adopt and mirror based on mirror output
+        self.edit_mirror_out.textChanged.connect(self._update_mirror_dependent_ops)
 
-    def on_lib_plan(self) -> None:
-        """Plan library maintenance (dry run)."""
+    def _update_mirror_dependent_ops(self) -> None:
+        """Enable/disable adopt and mirror operations based on mirror output path."""
+        has_mirror = bool(self.edit_mirror_out.text().strip())
+        self.chk_op_adopt.setEnabled(has_mirror)
+        self.chk_op_mirror.setEnabled(has_mirror)
+        self.btn_run_adopt.setEnabled(has_mirror)
+        self.btn_run_mirror.setEnabled(has_mirror)
+        if not has_mirror:
+            self.chk_op_adopt.setChecked(False)
+            self.chk_op_mirror.setChecked(False)
+
+    def _get_selected_phases(self) -> set:
+        """Get the set of phases selected by checkboxes."""
+        phases = set()
+        # Always include scan for other FLAC operations
+        if self.chk_op_integrity.isChecked():
+            phases.add(PHASE_INTEGRITY)
+        if self.chk_op_resample.isChecked():
+            phases.add(PHASE_RESAMPLE)
+        if self.chk_op_recompress.isChecked():
+            phases.add(PHASE_RECOMPRESS)
+        if self.chk_op_artwork.isChecked():
+            phases.add(PHASE_ARTWORK)
+        if self.chk_op_adopt.isChecked():
+            phases.add(PHASE_ADOPT)
+        if self.chk_op_mirror.isChecked():
+            phases.add(PHASE_MIRROR)
+        return phases
+
+    def _run_single_op(self, phase: str) -> None:
+        """Run a single operation."""
         self.log.clear()
         self.counters_group.hide()
         self.lib_issues_list.clear()
-        self._start_lib_operation(dry_run=True)
+        
+        # For adopt, use AdoptWorker directly
+        if phase == PHASE_ADOPT:
+            self._start_adopt_operation()
+        else:
+            self._start_lib_operation(
+                dry_run=self.chk_lib_dry_run.isChecked(),
+                phases={phase}
+            )
+
+    def on_scan_adoptable(self) -> None:
+        """Scan for adoptable files and show count."""
+        mirror_out = self.edit_mirror_out.text().strip()
+        if not mirror_out or not Path(mirror_out).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Mirror Output",
+                "Please select a valid mirror output directory to scan for adoptable files"
+            )
+            return
+        
+        logger.info(f"Scanning for adoptable files in {mirror_out}")
+        adoptable = scan_adoptable_files(Path(mirror_out))
+        count = len(adoptable)
+        self.lbl_adoptable_count.setText(f"({count} found)")
+        
+        if count > 0:
+            logger.info(f"Found {count} adoptable files without PAC_* tags")
+        else:
+            logger.info("No adoptable files found")
 
     def on_lib_run(self) -> None:
-        """Run library maintenance."""
+        """Run selected library operations."""
         self.log.clear()
         self.counters_group.hide()
         self.lib_issues_list.clear()
-        self._start_lib_operation(dry_run=False)
+        
+        phases = self._get_selected_phases()
+        if not phases:
+            QtWidgets.QMessageBox.warning(
+                self, "No Operations Selected",
+                "Please select at least one operation to run"
+            )
+            return
+        
+        # Handle adopt separately if it's the only phase
+        if phases == {PHASE_ADOPT}:
+            self._start_adopt_operation()
+        else:
+            # Remove adopt from phases - it's handled separately
+            lib_phases = phases - {PHASE_ADOPT}
+            if lib_phases:
+                self._start_lib_operation(
+                    dry_run=self.chk_lib_dry_run.isChecked(),
+                    phases=lib_phases
+                )
 
     def on_lib_cancel(self) -> None:
         """Cancel library operation."""
         logger.warning("Cancel requested by user.")
         if hasattr(self, "lib_worker") and self.lib_worker.isRunning():
             self.lib_worker.cancel()
+        if hasattr(self, "adopt_worker") and self.adopt_worker.isRunning():
+            self.adopt_worker.cancel()
         self.btn_lib_cancel.setEnabled(False)
         self.btn_lib_pause.setEnabled(False)
 
     def on_lib_pause_resume(self) -> None:
         """Pause/resume library operation."""
+        worker = None
         if hasattr(self, "lib_worker") and self.lib_worker.isRunning():
-            self.lib_worker.toggle_pause()
+            worker = self.lib_worker
+        elif hasattr(self, "adopt_worker") and self.adopt_worker.isRunning():
+            worker = self.adopt_worker
+        
+        if worker:
+            worker.toggle_pause()
             if self.btn_lib_pause.text() == "Pause":
                 logger.info("Pausing...")
                 self.btn_lib_pause.setText("Resume")
@@ -634,8 +873,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 logger.info("Resuming...")
                 self.btn_lib_pause.setText("Pause")
 
-    def _start_lib_operation(self, *, dry_run: bool) -> None:
-        """Start library operation."""
+    def _start_adopt_operation(self) -> None:
+        """Start adopt legacy files operation."""
+        lib_root = self.edit_lib_root.text().strip()
+        mirror_out = self.edit_mirror_out.text().strip()
+        
+        if not lib_root or not Path(lib_root).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Library Root",
+                "Please select a valid FLAC library root directory"
+            )
+            return
+        
+        if not mirror_out or not Path(mirror_out).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Mirror Output",
+                "Please select a valid mirror output directory for adopting files"
+            )
+            return
+        
+        # Disable UI during run
+        self._disable_lib_ui()
+        
+        # Start adopt worker
+        self.adopt_worker = AdoptWorker(
+            cfg=self.settings,
+            output_dir=mirror_out,
+            source_dir=lib_root,
+            dry_run=self.chk_lib_dry_run.isChecked(),
+        )
+        self.adopt_worker.summary_ready.connect(self._on_adopt_summary_ready)
+        self.adopt_worker.progress_update.connect(self._on_lib_progress_update)
+        self.adopt_worker.finished_with_code.connect(self._on_lib_done)
+        self.adopt_worker.finished.connect(self._reenable_lib_ui)
+        self.adopt_worker.start()
+
+    def _start_lib_operation(self, *, dry_run: bool, phases: Optional[set] = None) -> None:
+        """Start library operation with specified phases."""
         lib_root = self.edit_lib_root.text().strip()
         if not lib_root or not Path(lib_root).exists():
             QtWidgets.QMessageBox.warning(self, "Missing Library Root", "Please select a valid FLAC library root directory")
@@ -646,7 +920,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Update settings with library-specific values
         lib_overrides = {
             "flac_target_compression": self.spin_lib_compression.value(),
-            "flac_resample_to_cd": self.chk_lib_resample.isChecked(),
+            "flac_resample_to_cd": self.chk_op_resample.isChecked(),
             "flac_art_root": self.edit_lib_art_root.text().strip() if self.edit_lib_art_root.text().strip() else None,
             "flac_art_pattern": self.edit_lib_art_pattern.text().strip() or None,
             "flac_workers": self.spin_lib_flac_workers.value(),
@@ -659,15 +933,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lib_settings = self.settings.model_copy(update=lib_overrides)
 
         # Disable UI during run
-        for w in [self.btn_lib_plan, self.btn_lib_run, self.btn_preflight, self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out]:
-            w.hide()
-
-        self.btn_lib_pause.show()
-        self.btn_lib_cancel.show()
-        self.btn_lib_pause.setEnabled(True)
-        self.btn_lib_cancel.setEnabled(True)
-        self.btn_lib_pause.setText("Pause")
-        self.progress.show()
+        self._disable_lib_ui()
 
         # Start library worker
         self.lib_worker = LibraryWorker(
@@ -675,15 +941,25 @@ class MainWindow(QtWidgets.QMainWindow):
             root=lib_root,
             mirror_out=mirror_out,
             dry_run=dry_run,
+            phases=phases,
         )
         self.lib_worker.summary_ready.connect(self._on_lib_summary_ready)
+        self.lib_worker.progress_update.connect(self._on_lib_progress_update)
         self.lib_worker.finished_with_code.connect(self._on_lib_done)
         self.lib_worker.finished.connect(self._reenable_lib_ui)
         self.lib_worker.start()
 
+    def _on_lib_progress_update(self, phase: str, current: int, total: int) -> None:
+        """Handle progress updates from library worker."""
+        if total > 0:
+            self.lbl_lib_current_op.setText(f"{phase}: {current}/{total}")
+        else:
+            self.lbl_lib_current_op.setText(f"{phase}: scanning...")
+
     def _on_lib_summary_ready(self, summary: dict) -> None:
         """Update UI with library summary."""
         self.counters_group.show()
+        self.lbl_lib_current_op.setText("")
 
         # Update counters
         self.lbl_lib_scanned.setText(f"Scanned: {summary.get('scanned', 0)}")
@@ -709,6 +985,18 @@ class MainWindow(QtWidgets.QMainWindow):
             for phase, time_taken in timing.items():
                 logger.info(f"  {phase}: {time_taken:.1f}s")
 
+    def _on_adopt_summary_ready(self, summary: dict) -> None:
+        """Update UI with adopt operation summary."""
+        self.counters_group.show()
+        self.lbl_lib_current_op.setText("")
+        
+        # Update adopt counter
+        self.lbl_lib_adopted.setText(f"Adopted: {summary.get('adopted', 0)}")
+        
+        # Log details
+        logger.info(f"Adopt summary: {summary.get('adopted', 0)} adopted, "
+                    f"{summary.get('skipped', 0)} skipped, {summary.get('failed', 0)} failed")
+
     def _on_lib_done(self, code: int) -> None:
         """Handle library operation completion."""
         self.activateWindow()
@@ -718,14 +1006,46 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             QtWidgets.QMessageBox.warning(self, "Library Complete", "Library maintenance completed with errors. See log for details.")
 
+    def _disable_lib_ui(self) -> None:
+        """Disable library UI during operation."""
+        # Hide action buttons and browse buttons
+        widgets_to_hide = [
+            self.btn_lib_run, self.btn_lib_scan_adoptable,
+            self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out,
+            self.btn_run_integrity, self.btn_run_resample, self.btn_run_recompress,
+            self.btn_run_artwork, self.btn_run_adopt, self.btn_run_mirror,
+        ]
+        for w in widgets_to_hide:
+            w.hide()
+        
+        # Show pause/cancel
+        self.btn_lib_pause.show()
+        self.btn_lib_cancel.show()
+        self.btn_lib_pause.setEnabled(True)
+        self.btn_lib_cancel.setEnabled(True)
+        self.btn_lib_pause.setText("Pause")
+        self.progress.show()
+
     def _reenable_lib_ui(self) -> None:
         """Re-enable library UI after operation."""
         self.progress.hide()
         self.btn_lib_pause.hide()
         self.btn_lib_cancel.hide()
-        for w in [self.btn_lib_plan, self.btn_lib_run, self.btn_preflight, self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out]:
+        self.lbl_lib_current_op.setText("")
+        
+        # Show action buttons and browse buttons
+        widgets_to_show = [
+            self.btn_lib_run, self.btn_lib_scan_adoptable,
+            self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out,
+            self.btn_run_integrity, self.btn_run_resample, self.btn_run_recompress,
+            self.btn_run_artwork, self.btn_run_adopt, self.btn_run_mirror,
+        ]
+        for w in widgets_to_show:
             w.show()
             w.setEnabled(True)
+        
+        # Re-apply mirror-dependent state
+        self._update_mirror_dependent_ops()
         self._apply_encoder_ui()
 
     def _setup_shared_components(self, outer: QtWidgets.QVBoxLayout) -> None:
