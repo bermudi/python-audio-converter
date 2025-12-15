@@ -18,6 +18,6 @@
 
 ## 4. Testing
 
-- [ ] 4.1 Manual test: Startup skips qaac probe when setting is False
-- [ ] 4.2 Manual test: "Check Wine Encoders" button triggers qaac detection
-- [ ] 4.3 Manual test: Encoder preference persists across restarts
+- [x] 4.1 Manual test: Startup skips qaac probe when setting is False
+- [x] 4.2 Manual test: "Check Wine Encoders" button triggers qaac detection
+- [x] 4.3 Manual test: Encoder preference persists across restarts
