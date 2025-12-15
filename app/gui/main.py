@@ -233,6 +233,8 @@ class LibraryWorker(QtCore.QThread):
                 self.root,
                 mirror_out=self.mirror_out,
                 dry_run=self.dry_run,
+                stop_event=self.stop_event,
+                pause_event=self.pause_event,
             )
             self.summary_ready.emit(summary)
             self.finished_with_code.emit(exit_code)
@@ -692,6 +694,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_lib_art_exported.setText(f"Artwork Exported: {summary.get('extract_art', 0)}")
         self.lbl_lib_held.setText(f"Held: {summary.get('hold', 0)}")
 
+        # Populate issues list with held files
+        self.lib_issues_list.clear()
+        for held_file in summary.get("held_files", []):
+            path = held_file.get("path", "unknown")
+            reason = held_file.get("reason", "unknown reason")
+            self.lib_issues_list.addItem(f"{path}: {reason}")
+
         # Show timing information
         timing = summary.get("timing_s", {})
         if timing:
@@ -702,6 +711,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_lib_done(self, code: int) -> None:
         """Handle library operation completion."""
+        self.activateWindow()
+        self.raise_()
         if code == 0:
             QtWidgets.QMessageBox.information(self, "Library Complete", "Library maintenance completed successfully")
         else:
@@ -923,6 +934,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_plan_sync_tags.setText(f"Sync Tags: {plan.get('to_sync_tags', 0)}")
 
     def _on_convert_done(self, code: int) -> None:
+        self.activateWindow()
+        self.raise_()
         if code == EXIT_OK:
             QtWidgets.QMessageBox.information(self, "Done", "Operation completed successfully")
         elif code == EXIT_PREFLIGHT_FAILED:

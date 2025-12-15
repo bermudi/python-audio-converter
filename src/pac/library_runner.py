@@ -66,6 +66,7 @@ def cmd_manage_library(
         actions_by_type.setdefault(item.action, []).append(item)
 
     # Summary
+    held_items = actions_by_type.get("hold", [])
     summary = {
         "scanned": len(sources),
         "planned": len(plan),
@@ -73,7 +74,8 @@ def cmd_manage_library(
         "resample_to_cd": len(actions_by_type.get("resample_to_cd", [])),
         "recompress": len(actions_by_type.get("recompress", [])),
         "extract_art": len(actions_by_type.get("extract_art", [])),
-        "hold": len(actions_by_type.get("hold", [])),
+        "hold": len(held_items),
+        "held_files": [{"path": str(item.rel_path), "reason": item.reason} for item in held_items],
     }
 
     if dry_run:

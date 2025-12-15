@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, Optional, Tuple
 import time
 
 from loguru import logger
@@ -111,8 +111,8 @@ def plan_library_actions(
         art_root = Path(cfg.flac_art_root).expanduser()
         art_pattern = cfg.flac_art_pattern
         try:
-            extracted_path = extract_art(src_path, art_root, art_pattern, md5, db)
-            if extracted_path:
+            art_needed, potential_path = check_art_extraction_needed(src_path, art_root, art_pattern, md5, db)
+            if art_needed and potential_path:
                 plan.append(LibraryPlanItem(
                     action="extract_art",
                     reason="Export front cover artwork",
@@ -122,7 +122,7 @@ def plan_library_actions(
                     params={
                         "art_root": str(art_root),
                         "art_pattern": art_pattern,
-                        "extracted_path": str(extracted_path)
+                        "target_path": str(potential_path)
                     }
                 ))
         except Exception as e:
@@ -139,35 +139,33 @@ def plan_library_actions(
     return plan
 
 
-def extract_art(
+def check_art_extraction_needed(
     src_path: Path,
     art_root: Path,
     art_pattern: str,
     flac_md5: str,
     db: Optional[PacDB] = None
-) -> Optional[Path]:
+) -> Tuple[bool, Optional[Path]]:
     """
-    Extract front cover artwork from FLAC file to the specified art root using the pattern.
+    Check if artwork extraction is needed for a FLAC file.
 
-    Returns the path where artwork was extracted, or None if no artwork or extraction failed.
-    Updates DB if provided.
+    Returns (needs_extraction, target_path) tuple.
+    Does NOT perform the actual extraction - that's done by flac_tools.extract_art().
     """
     from .metadata import _first_front_cover
     from mutagen.flac import FLAC
-    import os
     from loguru import logger
 
-    potential_art_path = None
     try:
         flac_obj = FLAC(str(src_path))
         if not flac_obj or not _first_front_cover(flac_obj):
             logger.debug(f"No embedded artwork in {src_path}")
-            return None
+            return False, None
 
         potential_art_path = _resolve_art_pattern(art_pattern, flac_obj, art_root)
         if not potential_art_path:
             logger.debug(f"Could not resolve art path for {src_path}")
-            return None
+            return False, None
 
         # Check if extraction is needed
         art_needed = False
@@ -188,34 +186,9 @@ def extract_art(
 
         if not art_needed:
             logger.debug(f"Artwork up to date for {src_path}")
-            return potential_art_path
 
-        # Extract artwork
-        # Get the front cover picture data
-        front_cover = _first_front_cover(flac_obj)
-        if not front_cover:
-            return None
-
-        # Ensure directory exists
-        potential_art_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write the image data
-        with open(potential_art_path, 'wb') as f:
-            f.write(front_cover)
-
-        # Update DB if provided
-        if db:
-            now_ts = int(time.time())
-            size = len(front_cover)
-            db.conn.execute(
-                "INSERT OR REPLACE INTO art_exports (md5, last_export_ts, size) VALUES (?, ?, ?)",
-                (flac_md5, now_ts, size)
-            )
-            db.conn.commit()
-
-        logger.info(f"Extracted artwork to {potential_art_path}")
-        return potential_art_path
+        return art_needed, potential_art_path
 
     except Exception as e:
-        logger.warning(f"Failed to extract artwork for {src_path}: {e}")
-        return None
+        logger.warning(f"Failed to check artwork for {src_path}: {e}")
+        return False, None
