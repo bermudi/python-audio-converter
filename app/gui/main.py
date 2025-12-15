@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import sys
 import threading
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from loguru import logger
 
 # Ensure local src/ is importable when running from project root
@@ -41,6 +43,49 @@ from pac.library_analyzer import (  # noqa: E402
     SyncStatus,
 )
 from main import configure_logging, cmd_convert_dir, EXIT_OK, EXIT_WITH_FILE_ERRORS, EXIT_PREFLIGHT_FAILED  # noqa: E402
+
+
+class DropLineEdit(QtWidgets.QLineEdit):
+    """QLineEdit subclass that accepts directory drops via drag-and-drop.
+    
+    Works on both X11 and Wayland (including KDE Plasma) using Qt6's native
+    drag-drop support with text/uri-list MIME type.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAcceptDrops(True)
+    
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
+        """Accept drag events containing file/folder URIs."""
+        if event.mimeData().hasUrls():
+            # Check if any URL is a local directory
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = Path(url.toLocalFile())
+                    if path.is_dir():
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+    
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:
+        """Accept drag move events for valid drops."""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+    
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:
+        """Handle drop events by extracting directory path."""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    path = Path(url.toLocalFile())
+                    if path.is_dir():
+                        self.setText(str(path))
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
 
 
 class LogEmitter(QtCore.QObject):
@@ -789,10 +834,23 @@ class LibrarySettingsDialog(QtWidgets.QDialog):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        flac_library: Optional[str] = None,
+        mirror_library: Optional[str] = None,
+        source: Optional[str] = None,
+        output: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("Python Audio Converter")
         self.resize(1000, 700)
+        
+        # Store CLI arguments for later population
+        self._init_flac_library = flac_library
+        self._init_mirror_library = mirror_library
+        self._init_source = source
+        self._init_output = output
 
         self._ui_settings = QtCore.QSettings("python-audio-converter", "gui")
         self._log_collapsed = bool(self._ui_settings.value("log_collapsed", False, type=bool))
@@ -866,6 +924,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_emitter.message.connect(self.append_log)
         setup_logger_for_gui(self.log_emitter, level=self.settings.log_level, json_path=self.settings.log_json)
 
+        # Populate path fields from CLI arguments
+        self._populate_cli_paths()
+
         # Auto-run preflight on startup (after event loop starts)
         QtCore.QTimer.singleShot(100, self._auto_preflight)
 
@@ -875,7 +936,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # I/O selectors
         form = QtWidgets.QFormLayout()
-        self.edit_src = QtWidgets.QLineEdit()
+        self.edit_src = DropLineEdit()
         self.edit_src.setPlaceholderText("Source directory with .flac files")
         self.btn_src = QtWidgets.QPushButton("Browse…")
         src_row = QtWidgets.QHBoxLayout()
@@ -883,7 +944,7 @@ class MainWindow(QtWidgets.QMainWindow):
         src_row.addWidget(self.btn_src)
         form.addRow("Source:", self._wrap_row(src_row))
 
-        self.edit_dest = QtWidgets.QLineEdit()
+        self.edit_dest = DropLineEdit()
         self.edit_dest.setPlaceholderText("Destination root for outputs")
         self.btn_dest = QtWidgets.QPushButton("Browse…")
         dest_row = QtWidgets.QHBoxLayout()
@@ -1025,6 +1086,17 @@ class MainWindow(QtWidgets.QMainWindow):
             box.setLayout(lay)
         return box
 
+    def _populate_cli_paths(self) -> None:
+        """Populate path fields from CLI arguments provided at startup."""
+        if self._init_flac_library:
+            self.edit_lib_root.setText(self._init_flac_library)
+        if self._init_mirror_library:
+            self.edit_mirror_out.setText(self._init_mirror_library)
+        if self._init_source:
+            self.edit_src.setText(self._init_source)
+        if self._init_output:
+            self.edit_dest.setText(self._init_output)
+
     def _setup_library_tab(self) -> None:
         """Setup the library management tab with browser-first layout."""
         layout = QtWidgets.QVBoxLayout(self.library_tab)
@@ -1037,7 +1109,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Library root
         top_bar.addWidget(QtWidgets.QLabel("Library:"))
-        self.edit_lib_root = QtWidgets.QLineEdit()
+        self.edit_lib_root = DropLineEdit()
         self.edit_lib_root.setPlaceholderText("FLAC library root")
         self.btn_lib_root = QtWidgets.QPushButton("…")
         self.btn_lib_root.setFixedWidth(30)
@@ -1046,7 +1118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Mirror output
         top_bar.addWidget(QtWidgets.QLabel("Mirror:"))
-        self.edit_mirror_out = QtWidgets.QLineEdit()
+        self.edit_mirror_out = DropLineEdit()
         self.edit_mirror_out.setPlaceholderText("Optional output dir")
         self.btn_mirror_out = QtWidgets.QPushButton("…")
         self.btn_mirror_out.setFixedWidth(30)
@@ -2514,11 +2586,46 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.btn_pause.setText("Pause")
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for GUI startup."""
+    parser = argparse.ArgumentParser(
+        description="Python Audio Converter GUI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--flac-library",
+        metavar="DIR",
+        help="Pre-populate Library tab FLAC library path",
+    )
+    parser.add_argument(
+        "--mirror-library",
+        metavar="DIR",
+        help="Pre-populate Library tab mirror output path",
+    )
+    parser.add_argument(
+        "--source",
+        metavar="DIR",
+        help="Pre-populate Convert tab source directory",
+    )
+    parser.add_argument(
+        "--output",
+        metavar="DIR",
+        help="Pre-populate Convert tab output directory",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    args = parse_args()
     # Configure a basic console logger early to catch startup
     configure_logging()
-    w = MainWindow()
+    w = MainWindow(
+        flac_library=args.flac_library,
+        mirror_library=args.mirror_library,
+        source=args.source,
+        output=args.output,
+    )
     w.show()
     return app.exec()
 
