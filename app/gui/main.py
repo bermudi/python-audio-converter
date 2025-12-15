@@ -222,6 +222,7 @@ class LibraryWorker(QtCore.QThread):
         mirror_out: Optional[str] = None,
         dry_run: bool = False,
         phases: Optional[set] = None,
+        only_rel_paths: Optional[List[str]] = None,
         **kwargs
     ) -> None:
         super().__init__()
@@ -230,6 +231,7 @@ class LibraryWorker(QtCore.QThread):
         self.mirror_out = mirror_out
         self.dry_run = dry_run
         self.phases = phases
+        self.only_rel_paths = only_rel_paths
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.pause_event.set()  # Not paused initially
@@ -254,6 +256,7 @@ class LibraryWorker(QtCore.QThread):
                 mirror_out=self.mirror_out,
                 dry_run=self.dry_run,
                 phases=self.phases,
+                only_rel_paths=self.only_rel_paths,
                 stop_event=self.stop_event,
                 pause_event=self.pause_event,
                 progress_callback=self._progress_callback,
@@ -1307,6 +1310,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mirror_out = self.edit_mirror_out.text().strip() if self.edit_mirror_out.text().strip() else None
 
+        # Determine scope: gather selected file paths if "Selection Only" is chosen
+        only_rel_paths = None
+        if self.radio_scope_selection.isChecked():
+            indexes = self.browser_table.selectionModel().selectedRows()
+            if not indexes:
+                QtWidgets.QMessageBox.warning(
+                    self, "No Selection",
+                    "Please select files in the browser, or switch scope to 'Entire Library'."
+                )
+                return
+            only_rel_paths = []
+            for idx in indexes:
+                source_idx = self.browser_proxy_model.mapToSource(idx)
+                f = self.browser_model.get_file_at(source_idx.row())
+                if f:
+                    only_rel_paths.append(str(f.rel_path))
+            logger.info(f"Running on selection: {len(only_rel_paths)} files")
+
         # Update settings with library-specific values from modal dialog cache
         lib_overrides = self._get_lib_settings_overrides()
 
@@ -1323,6 +1344,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mirror_out=mirror_out,
             dry_run=dry_run,
             phases=phases,
+            only_rel_paths=only_rel_paths,
         )
         self.lib_worker.summary_ready.connect(self._on_lib_summary_ready)
         self.lib_worker.progress_update.connect(self._on_lib_progress_update)
