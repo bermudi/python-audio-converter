@@ -643,7 +643,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_shared_components(outer)
 
         # Connections
-        self.btn_preflight.clicked.connect(self.on_preflight)
+        self.btn_recheck_encoders.clicked.connect(self.on_preflight)
         self.btn_src.clicked.connect(lambda: self._pick_dir(self.edit_src))
         self.btn_dest.clicked.connect(lambda: self._pick_dir(self.edit_dest))
         self.btn_plan.clicked.connect(self.on_plan)
@@ -656,6 +656,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_emitter = LogEmitter()
         self.log_emitter.message.connect(self.append_log)
         setup_logger_for_gui(self.log_emitter, level=self.settings.log_level, json_path=self.settings.log_json)
+
+        # Auto-run preflight on startup (after event loop starts)
+        QtCore.QTimer.singleShot(100, self._auto_preflight)
 
     def _setup_convert_tab(self) -> None:
         """Setup the convert tab with existing functionality."""
@@ -1630,13 +1633,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _setup_shared_components(self, outer: QtWidgets.QVBoxLayout) -> None:
         """Setup components shared between tabs (preflight, progress, log)."""
-        # Preflight row
-        pf_row = QtWidgets.QHBoxLayout()
-        self.btn_preflight = QtWidgets.QPushButton("Preflight")
-        self.lbl_preflight = QtWidgets.QLabel("Not checked")
-        pf_row.addWidget(self.btn_preflight)
-        pf_row.addWidget(self.lbl_preflight, 1)
-        outer.addLayout(pf_row)
+        # Encoder status row (persistent display)
+        encoder_row = QtWidgets.QHBoxLayout()
+        self.lbl_encoder_icon = QtWidgets.QLabel("⏳")
+        self.lbl_encoder_icon.setFixedWidth(20)
+        self.lbl_preflight = QtWidgets.QLabel("Checking encoders...")
+        self.btn_recheck_encoders = QtWidgets.QPushButton("Re-check Encoders")
+        self.btn_recheck_encoders.setToolTip("Re-run encoder detection")
+        self.btn_recheck_encoders.setEnabled(False)  # Disabled during auto-preflight
+        encoder_row.addWidget(self.lbl_encoder_icon)
+        encoder_row.addWidget(self.lbl_preflight, 1)
+        encoder_row.addWidget(self.btn_recheck_encoders)
+        outer.addLayout(encoder_row)
 
         # Progress + log
         self.progress = QtWidgets.QProgressBar()
@@ -1657,36 +1665,51 @@ class MainWindow(QtWidgets.QMainWindow):
         if d:
             target.setText(d)
 
+    def _auto_preflight(self) -> None:
+        """Auto-run preflight check on startup."""
+        logger.info("Auto-running preflight check...")
+        self.on_preflight()
+
     def on_preflight(self) -> None:
-        self.btn_preflight.setEnabled(False)
-        self.lbl_preflight.setText("Checking…")
+        """Run preflight encoder detection."""
+        self.btn_recheck_encoders.setEnabled(False)
+        self.lbl_preflight.setText("Checking encoders...")
+        self.lbl_encoder_icon.setText("⏳")
         self.pf = PreflightWorker()
         self.pf.result.connect(self._on_preflight_ok)
         self.pf.failed.connect(self._on_preflight_err)
-        self.pf.finished.connect(lambda: self.btn_preflight.setEnabled(True))
+        self.pf.finished.connect(lambda: self.btn_recheck_encoders.setEnabled(True))
         self.pf.start()
 
     def _on_preflight_ok(self, res: dict) -> None:
         self.preflight_results = res
         if res.get("ok"):
-            txt = (
-                f"ffmpeg: {res.get('ffmpeg')}\n"
-                f"libfdk_aac: {'YES' if res.get('libfdk_aac') else 'NO'} | "
-                f"libopus: {'YES' if res.get('libopus') else 'NO'} | "
-                f"qaac: {res.get('qaac') or 'NO'} | "
-                f"fdkaac: {res.get('fdkaac') or 'NO'}"
-            )
+            # Build compact encoder status
+            encoders = []
+            if res.get("libfdk_aac"):
+                encoders.append("libfdk_aac")
+            if res.get("libopus"):
+                encoders.append("libopus")
+            if res.get("qaac"):
+                encoders.append(f"qaac {res.get('qaac')}")
+            if res.get("fdkaac"):
+                encoders.append(f"fdkaac {res.get('fdkaac')}")
+            
+            txt = f"ffmpeg {res.get('ffmpeg', 'unknown')} | Available: {', '.join(encoders)}"
             self.lbl_preflight.setText(txt)
-            logger.info("Preflight OK")
+            self.lbl_encoder_icon.setText("✅")
+            logger.info("Preflight OK - encoders available")
             self._on_codec_change(self.combo_codec.currentText())
         else:
             self.lbl_preflight.setText("No suitable AAC or Opus encoder found")
+            self.lbl_encoder_icon.setText("❌")
             logger.error("No suitable encoder available.")
             self.selected_encoder = None
             self._apply_encoder_ui()
 
     def _on_preflight_err(self, msg: str) -> None:
-        self.lbl_preflight.setText(f"Preflight error: {msg}")
+        self.lbl_preflight.setText(f"Encoder check failed: {msg}")
+        self.lbl_encoder_icon.setText("❌")
         logger.error(f"Preflight error: {msg}")
         self.selected_encoder = None
         self.preflight_results = None
@@ -1798,7 +1821,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
         # Disable UI during run
-        for w in [self.btn_plan, self.btn_convert, self.btn_preflight, self.btn_src, self.btn_dest]:
+        for w in [self.btn_plan, self.btn_convert, self.btn_recheck_encoders, self.btn_src, self.btn_dest]:
             w.hide()
 
         self.btn_pause.show()
@@ -1819,7 +1842,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.hide()
         self.btn_pause.hide()
         self.btn_cancel.hide()
-        for w in [self.btn_plan, self.btn_convert, self.btn_preflight, self.btn_src, self.btn_dest]:
+        for w in [self.btn_plan, self.btn_convert, self.btn_recheck_encoders, self.btn_src, self.btn_dest]:
             w.show()
             w.setEnabled(True)
         self._apply_encoder_ui()
