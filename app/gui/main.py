@@ -26,6 +26,14 @@ from pac.library_runner import (  # noqa: E402
     PHASE_SCAN, PHASE_INTEGRITY, PHASE_RESAMPLE, PHASE_RECOMPRESS, PHASE_ARTWORK, PHASE_ADOPT, PHASE_MIRROR,
     ALL_PHASES,
 )
+from pac.library_analyzer import (  # noqa: E402
+    analyze_library,
+    analyze_output_directory,
+    AnalyzedFile,
+    LibraryAnalysis,
+    FileStatus,
+    IntegrityStatus,
+)
 from main import configure_logging, cmd_convert_dir, EXIT_OK, EXIT_WITH_FILE_ERRORS, EXIT_PREFLIGHT_FAILED  # noqa: E402
 
 
@@ -308,6 +316,184 @@ class AdoptWorker(QtCore.QThread):
         except Exception as e:
             logger.error(f"Adopt operation failed: {e}")
             self.finished_with_code.emit(1)
+
+
+class BrowserWorker(QtCore.QThread):
+    """Worker thread for scanning library for browser view."""
+    finished_with_result = QtCore.Signal(object)  # LibraryAnalysis
+    progress_update = QtCore.Signal(int, int)  # current, total
+
+    def __init__(
+        self,
+        cfg: PacSettings,
+        root: str,
+        *,
+        scan_outputs: bool = False,
+        output_dir: Optional[str] = None,
+    ) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.root = root
+        self.scan_outputs = scan_outputs
+        self.output_dir = output_dir
+        self.stop_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.stop_event.set()
+
+    def _progress_callback(self, current: int, total: int) -> None:
+        self.progress_update.emit(current, total)
+
+    def run(self) -> None:  # type: ignore[override]
+        from pac.db import PacDB
+        try:
+            db = None
+            if self.cfg.db_enable:
+                db_path = Path(self.cfg.db_path).expanduser()
+                db = PacDB(db_path)
+
+            if self.scan_outputs and self.output_dir:
+                analysis = analyze_output_directory(
+                    Path(self.output_dir),
+                    source_root=Path(self.root) if self.root else None,
+                    stop_event=self.stop_event,
+                    progress_callback=self._progress_callback,
+                )
+            else:
+                analysis = analyze_library(
+                    Path(self.root),
+                    self.cfg,
+                    db=db,
+                    stop_event=self.stop_event,
+                    progress_callback=self._progress_callback,
+                )
+            self.finished_with_result.emit(analysis)
+        except Exception as e:
+            logger.error(f"Browser scan failed: {e}")
+            self.finished_with_result.emit(None)
+
+
+class LibraryTableModel(QtCore.QAbstractTableModel):
+    """Table model for displaying analyzed library files."""
+    
+    COLUMNS = ["Path", "Status", "Integrity", "Format", "Compression", "Art", "Size"]
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._files: List[AnalyzedFile] = []
+        self._filtered_files: List[AnalyzedFile] = []
+        self._filter_status: Optional[FileStatus] = None
+        self._filter_integrity: Optional[IntegrityStatus] = None
+        self._filter_hires: Optional[bool] = None
+        self._filter_legacy: Optional[bool] = None
+        self._filter_needs_action: Optional[bool] = None
+    
+    def set_files(self, files: List[AnalyzedFile]) -> None:
+        self.beginResetModel()
+        self._files = files
+        self._apply_filters()
+        self.endResetModel()
+    
+    def set_filter(
+        self,
+        status: Optional[FileStatus] = None,
+        integrity: Optional[IntegrityStatus] = None,
+        hires: Optional[bool] = None,
+        legacy: Optional[bool] = None,
+        needs_action: Optional[bool] = None,
+    ) -> None:
+        self.beginResetModel()
+        self._filter_status = status
+        self._filter_integrity = integrity
+        self._filter_hires = hires
+        self._filter_legacy = legacy
+        self._filter_needs_action = needs_action
+        self._apply_filters()
+        self.endResetModel()
+    
+    def clear_filters(self) -> None:
+        self.set_filter()
+    
+    def _apply_filters(self) -> None:
+        self._filtered_files = []
+        for f in self._files:
+            if self._filter_status and f.overall_status != self._filter_status:
+                continue
+            if self._filter_integrity and f.integrity_status != self._filter_integrity:
+                continue
+            if self._filter_hires is True and not f.is_hires:
+                continue
+            if self._filter_legacy is True and not f.is_legacy:
+                continue
+            if self._filter_needs_action is True and f.overall_status != FileStatus.NEEDS_ACTION:
+                continue
+            self._filtered_files.append(f)
+    
+    def rowCount(self, parent=None) -> int:
+        return len(self._filtered_files)
+    
+    def columnCount(self, parent=None) -> int:
+        return len(self.COLUMNS)
+    
+    def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
+        if role == QtCore.Qt.DisplayRole and orientation == QtCore.Qt.Horizontal:
+            return self.COLUMNS[section]
+        return None
+    
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._filtered_files):
+            return None
+        
+        f = self._filtered_files[index.row()]
+        col = index.column()
+        
+        if role == QtCore.Qt.DisplayRole:
+            if col == 0:  # Path
+                return str(f.rel_path)
+            elif col == 1:  # Status
+                return f.overall_status.value.title()
+            elif col == 2:  # Integrity
+                return f.integrity_status.value.replace("_", " ").title()
+            elif col == 3:  # Format
+                if f.bit_depth and f.sample_rate:
+                    return f"{f.bit_depth}bit/{f.sample_rate//1000}kHz"
+                return "-"
+            elif col == 4:  # Compression
+                if f.compression_level is not None:
+                    return f"Level {f.compression_level}"
+                return "No tag"
+            elif col == 5:  # Art
+                if f.has_embedded_art:
+                    return "✓ Exported" if f.art_exported else "✓ Embedded"
+                return "-"
+            elif col == 6:  # Size
+                return f"{f.size / 1024 / 1024:.1f} MB"
+        
+        elif role == QtCore.Qt.ForegroundRole:
+            if f.overall_status == FileStatus.ERROR:
+                return QtCore.Qt.red
+            elif f.overall_status == FileStatus.NEEDS_ACTION:
+                return QtCore.Qt.darkYellow
+            elif f.overall_status == FileStatus.OK:
+                return QtCore.Qt.darkGreen
+        
+        elif role == QtCore.Qt.ToolTipRole:
+            if f.status_reasons:
+                return "\n".join(f.status_reasons)
+        
+        elif role == QtCore.Qt.UserRole:
+            return f  # Return the full AnalyzedFile for selection handling
+        
+        return None
+    
+    def get_file_at(self, row: int) -> Optional[AnalyzedFile]:
+        if 0 <= row < len(self._filtered_files):
+            return self._filtered_files[row]
+        return None
+    
+    def get_selected_files(self, indexes) -> List[AnalyzedFile]:
+        rows = set(idx.row() for idx in indexes)
+        return [self._filtered_files[r] for r in rows if 0 <= r < len(self._filtered_files)]
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -718,6 +904,117 @@ class MainWindow(QtWidgets.QMainWindow):
         issues_layout.addWidget(self.lib_issues_list)
         counters_layout.addWidget(issues_group)
 
+        # Browser panel
+        browser_group = QtWidgets.QGroupBox("Library Browser")
+        browser_layout = QtWidgets.QVBoxLayout(browser_group)
+        
+        # Statistics bar (clickable to filter)
+        stats_bar = QtWidgets.QHBoxLayout()
+        self.btn_stat_total = QtWidgets.QPushButton("Total: 0")
+        self.btn_stat_total.setFlat(True)
+        self.btn_stat_total.setToolTip("Click to show all files")
+        self.btn_stat_hires = QtWidgets.QPushButton("Hi-Res: 0")
+        self.btn_stat_hires.setFlat(True)
+        self.btn_stat_hires.setToolTip("Click to filter hi-res files")
+        self.btn_stat_integrity_unknown = QtWidgets.QPushButton("Untested: 0")
+        self.btn_stat_integrity_unknown.setFlat(True)
+        self.btn_stat_integrity_unknown.setToolTip("Click to filter files never integrity tested")
+        self.btn_stat_integrity_failed = QtWidgets.QPushButton("Failed: 0")
+        self.btn_stat_integrity_failed.setFlat(True)
+        self.btn_stat_integrity_failed.setStyleSheet("color: red;")
+        self.btn_stat_integrity_failed.setToolTip("Click to filter integrity-failed files")
+        self.btn_stat_needs_recompress = QtWidgets.QPushButton("Needs Recompress: 0")
+        self.btn_stat_needs_recompress.setFlat(True)
+        self.btn_stat_needs_recompress.setToolTip("Click to filter files needing recompression")
+        self.btn_stat_legacy = QtWidgets.QPushButton("Legacy: 0")
+        self.btn_stat_legacy.setFlat(True)
+        self.btn_stat_legacy.setToolTip("Click to filter legacy output files without PAC tags")
+        
+        stats_bar.addWidget(self.btn_stat_total)
+        stats_bar.addWidget(self.btn_stat_hires)
+        stats_bar.addWidget(self.btn_stat_integrity_unknown)
+        stats_bar.addWidget(self.btn_stat_integrity_failed)
+        stats_bar.addWidget(self.btn_stat_needs_recompress)
+        stats_bar.addWidget(self.btn_stat_legacy)
+        stats_bar.addStretch(1)
+        browser_layout.addLayout(stats_bar)
+        
+        # Filter controls
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.addWidget(QtWidgets.QLabel("Filter:"))
+        self.combo_browser_filter = QtWidgets.QComboBox()
+        self.combo_browser_filter.addItems([
+            "All Files",
+            "Needs Action",
+            "Hi-Res Only",
+            "Integrity Unknown",
+            "Integrity Failed",
+            "Needs Recompress",
+            "Legacy (No PAC tags)",
+        ])
+        filter_row.addWidget(self.combo_browser_filter)
+        self.btn_browser_clear_filter = QtWidgets.QPushButton("Clear Filter")
+        filter_row.addWidget(self.btn_browser_clear_filter)
+        filter_row.addStretch(1)
+        self.btn_browser_scan = QtWidgets.QPushButton("Scan Library")
+        self.btn_browser_scan.setToolTip("Scan library to populate browser (non-destructive)")
+        filter_row.addWidget(self.btn_browser_scan)
+        browser_layout.addLayout(filter_row)
+        
+        # Table view for files
+        self.browser_table = QtWidgets.QTableView()
+        self.browser_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.browser_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.browser_table.setSortingEnabled(True)
+        self.browser_table.setAlternatingRowColors(True)
+        self.browser_table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.browser_table.horizontalHeader().setStretchLastSection(True)
+        self.browser_table.verticalHeader().setVisible(False)
+        
+        # Set up table model
+        self.browser_model = LibraryTableModel(self)
+        self.browser_proxy_model = QtCore.QSortFilterProxyModel(self)
+        self.browser_proxy_model.setSourceModel(self.browser_model)
+        self.browser_table.setModel(self.browser_proxy_model)
+        
+        browser_layout.addWidget(self.browser_table, 1)  # stretch factor 1 to expand
+        
+        # Selection info and actions
+        selection_row = QtWidgets.QHBoxLayout()
+        self.lbl_browser_selection = QtWidgets.QLabel("Selected: 0 files")
+        selection_row.addWidget(self.lbl_browser_selection)
+        selection_row.addStretch(1)
+        self.btn_browser_run_integrity = QtWidgets.QPushButton("Run Integrity")
+        self.btn_browser_run_integrity.setToolTip("Run integrity check on selected files")
+        self.btn_browser_run_integrity.setEnabled(False)
+        self.btn_browser_run_adopt = QtWidgets.QPushButton("Adopt Selected")
+        self.btn_browser_run_adopt.setToolTip("Adopt selected legacy files")
+        self.btn_browser_run_adopt.setEnabled(False)
+        selection_row.addWidget(self.btn_browser_run_integrity)
+        selection_row.addWidget(self.btn_browser_run_adopt)
+        browser_layout.addLayout(selection_row)
+        
+        layout.addWidget(browser_group, 1)  # stretch factor 1 to expand
+        
+        # Connect browser signals
+        self.btn_browser_scan.clicked.connect(self.on_browser_scan)
+        self.combo_browser_filter.currentTextChanged.connect(self._on_browser_filter_change)
+        self.btn_browser_clear_filter.clicked.connect(self._on_browser_clear_filter)
+        self.browser_table.selectionModel().selectionChanged.connect(self._on_browser_selection_changed)
+        self.browser_table.customContextMenuRequested.connect(self._on_browser_context_menu)
+        
+        # Connect statistics buttons to filters
+        self.btn_stat_total.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("All Files"))
+        self.btn_stat_hires.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Hi-Res Only"))
+        self.btn_stat_integrity_unknown.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Integrity Unknown"))
+        self.btn_stat_integrity_failed.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Integrity Failed"))
+        self.btn_stat_needs_recompress.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Needs Recompress"))
+        self.btn_stat_legacy.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Legacy (No PAC tags)"))
+        
+        # Connect selection-based action buttons
+        self.btn_browser_run_integrity.clicked.connect(self._on_browser_run_integrity)
+        self.btn_browser_run_adopt.clicked.connect(self._on_browser_run_adopt)
+
         # Action buttons
         actions = QtWidgets.QHBoxLayout()
         self.btn_lib_scan_adoptable = QtWidgets.QPushButton("Scan Adoptable")
@@ -1047,6 +1344,196 @@ class MainWindow(QtWidgets.QMainWindow):
         # Re-apply mirror-dependent state
         self._update_mirror_dependent_ops()
         self._apply_encoder_ui()
+
+    # Browser methods
+    def on_browser_scan(self) -> None:
+        """Start browser scan of library."""
+        lib_root = self.edit_lib_root.text().strip()
+        if not lib_root or not Path(lib_root).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Library Root",
+                "Please select a valid FLAC library root directory"
+            )
+            return
+        
+        logger.info(f"Starting browser scan of {lib_root}")
+        self.btn_browser_scan.setEnabled(False)
+        self.btn_browser_scan.setText("Scanning...")
+        self.progress.show()
+        
+        # Start browser worker
+        self.browser_worker = BrowserWorker(
+            cfg=self.settings,
+            root=lib_root,
+        )
+        self.browser_worker.progress_update.connect(self._on_browser_progress)
+        self.browser_worker.finished_with_result.connect(self._on_browser_scan_complete)
+        self.browser_worker.start()
+
+    def _on_browser_progress(self, current: int, total: int) -> None:
+        """Handle browser scan progress updates."""
+        if total > 0:
+            self.lbl_lib_current_op.setText(f"Scanning: {current}/{total}")
+
+    def _on_browser_scan_complete(self, analysis: LibraryAnalysis) -> None:
+        """Handle browser scan completion."""
+        self.btn_browser_scan.setEnabled(True)
+        self.btn_browser_scan.setText("Scan Library")
+        self.progress.hide()
+        self.lbl_lib_current_op.setText("")
+        
+        if analysis is None:
+            logger.error("Browser scan failed")
+            return
+        
+        logger.info(f"Browser scan complete: {analysis.total_files} files")
+        
+        # Store analysis for later use
+        self._current_analysis = analysis
+        
+        # Update table model
+        self.browser_model.set_files(analysis.files)
+        
+        # Update statistics
+        self._update_browser_statistics(analysis)
+        
+        # Resize columns to content
+        self.browser_table.resizeColumnsToContents()
+
+    def _update_browser_statistics(self, analysis: LibraryAnalysis) -> None:
+        """Update the statistics bar with analysis results."""
+        self.btn_stat_total.setText(f"Total: {analysis.total_files}")
+        self.btn_stat_hires.setText(f"Hi-Res: {analysis.hires_count}")
+        self.btn_stat_integrity_unknown.setText(f"Untested: {analysis.integrity_unknown_count}")
+        self.btn_stat_integrity_failed.setText(f"Failed: {analysis.integrity_failed_count}")
+        self.btn_stat_needs_recompress.setText(f"Needs Recompress: {analysis.needs_recompress_count}")
+        self.btn_stat_legacy.setText(f"Legacy: {analysis.legacy_count}")
+
+    def _on_browser_filter_change(self, filter_text: str) -> None:
+        """Handle filter combobox change."""
+        if filter_text == "All Files":
+            self.browser_model.clear_filters()
+        elif filter_text == "Needs Action":
+            self.browser_model.set_filter(needs_action=True)
+        elif filter_text == "Hi-Res Only":
+            self.browser_model.set_filter(hires=True)
+        elif filter_text == "Integrity Unknown":
+            self.browser_model.set_filter(integrity=IntegrityStatus.NEVER_TESTED)
+        elif filter_text == "Integrity Failed":
+            self.browser_model.set_filter(integrity=IntegrityStatus.FAILED)
+        elif filter_text == "Needs Recompress":
+            self.browser_model.set_filter(status=FileStatus.NEEDS_ACTION)
+        elif filter_text == "Legacy (No PAC tags)":
+            self.browser_model.set_filter(legacy=True)
+
+    def _on_browser_clear_filter(self) -> None:
+        """Clear browser filters."""
+        self.combo_browser_filter.setCurrentText("All Files")
+        self.browser_model.clear_filters()
+
+    def _on_browser_selection_changed(self) -> None:
+        """Handle browser table selection changes."""
+        indexes = self.browser_table.selectionModel().selectedRows()
+        count = len(indexes)
+        self.lbl_browser_selection.setText(f"Selected: {count} files")
+        
+        # Enable/disable action buttons based on selection
+        self.btn_browser_run_integrity.setEnabled(count > 0)
+        self.btn_browser_run_adopt.setEnabled(count > 0)
+
+    def _on_browser_context_menu(self, pos) -> None:
+        """Show context menu for browser table."""
+        indexes = self.browser_table.selectionModel().selectedRows()
+        if not indexes:
+            return
+        
+        menu = QtWidgets.QMenu(self)
+        
+        action_integrity = menu.addAction("Run Integrity Check")
+        action_integrity.triggered.connect(self._on_browser_run_integrity)
+        
+        action_adopt = menu.addAction("Adopt (add PAC tags)")
+        action_adopt.triggered.connect(self._on_browser_run_adopt)
+        
+        menu.addSeparator()
+        
+        action_show_in_folder = menu.addAction("Show in Folder")
+        action_show_in_folder.triggered.connect(self._on_browser_show_in_folder)
+        
+        menu.exec_(self.browser_table.viewport().mapToGlobal(pos))
+
+    def _on_browser_run_integrity(self) -> None:
+        """Run integrity check on selected files."""
+        indexes = self.browser_table.selectionModel().selectedRows()
+        if not indexes:
+            return
+        
+        # Get selected files from proxy model
+        selected_files = []
+        for idx in indexes:
+            source_idx = self.browser_proxy_model.mapToSource(idx)
+            f = self.browser_model.get_file_at(source_idx.row())
+            if f:
+                selected_files.append(f)
+        
+        if not selected_files:
+            return
+        
+        logger.info(f"Running integrity check on {len(selected_files)} selected files")
+        # TODO: Implement targeted integrity check on selected files
+        QtWidgets.QMessageBox.information(
+            self, "Not Implemented",
+            f"Integrity check on {len(selected_files)} selected files will be implemented.\n"
+            "For now, use 'Run Integrity' button for full library check."
+        )
+
+    def _on_browser_run_adopt(self) -> None:
+        """Adopt selected legacy files."""
+        indexes = self.browser_table.selectionModel().selectedRows()
+        if not indexes:
+            return
+        
+        # Get selected files from proxy model
+        selected_files = []
+        for idx in indexes:
+            source_idx = self.browser_proxy_model.mapToSource(idx)
+            f = self.browser_model.get_file_at(source_idx.row())
+            if f and f.is_legacy:
+                selected_files.append(f)
+        
+        if not selected_files:
+            QtWidgets.QMessageBox.information(
+                self, "No Legacy Files",
+                "No legacy files (files without PAC tags) in selection."
+            )
+            return
+        
+        logger.info(f"Adopting {len(selected_files)} selected legacy files")
+        # TODO: Implement targeted adopt on selected files
+        QtWidgets.QMessageBox.information(
+            self, "Not Implemented",
+            f"Adopt on {len(selected_files)} selected legacy files will be implemented.\n"
+            "For now, use 'Run' button with 'Adopt Legacy Files' checked."
+        )
+
+    def _on_browser_show_in_folder(self) -> None:
+        """Open folder containing selected file."""
+        indexes = self.browser_table.selectionModel().selectedRows()
+        if not indexes:
+            return
+        
+        source_idx = self.browser_proxy_model.mapToSource(indexes[0])
+        f = self.browser_model.get_file_at(source_idx.row())
+        if f:
+            import subprocess
+            import platform
+            folder = str(f.path.parent)
+            if platform.system() == "Windows":
+                subprocess.run(["explorer", folder])
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", folder])
+            else:
+                subprocess.run(["xdg-open", folder])
 
     def _setup_shared_components(self, outer: QtWidgets.QVBoxLayout) -> None:
         """Setup components shared between tabs (preflight, progress, log)."""
