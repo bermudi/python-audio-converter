@@ -23,3 +23,8 @@ pac-gui = "app.gui.main:main"
 pythonpath = [
   "src"
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]

@@ -359,6 +359,7 @@ def cmd_convert_dir(
         db_path = Path(cfg.db_path).expanduser()
         logger.info(f"Using history DB: {db_path}")
         db = PacDB(db_path)
+        db.ensure_schema()  # Ensure schema is up-to-date before use
 
     # Preflight: detect ffmpeg and choose encoder once for the whole run (stable planning)
     t_preflight_s = time.time()

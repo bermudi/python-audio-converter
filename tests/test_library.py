@@ -28,6 +28,10 @@ def test_plan_library_actions_basic():
 
     # Mock DB
     mock_db = Mock()
+    mock_row = Mock()
+    mock_row.last_test_ts = None  # Simulates no recent verification
+    mock_row.__getitem__ = lambda self, key: getattr(self, key)
+    mock_db.conn.execute.return_value.fetchone.return_value = mock_row
 
     with patch('pac.library_planner.flac_stream_info') as mock_info, \
          patch('pac.library_planner.needs_cd_downmix', return_value=False), \

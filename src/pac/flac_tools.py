@@ -283,7 +283,7 @@ def extract_art(src: Path, art_root: Path, pattern: str) -> Optional[Path]:
         # Create parent directories
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Write image data
+        # Write image data (img_data is already raw bytes)
         with open(output_path, 'wb') as f:
             f.write(img_data)
 

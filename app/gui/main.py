@@ -154,7 +154,10 @@ class ConvertWorker(QtCore.QThread):
             self.pause_event.set()  # Resume
 
     def run(self) -> None:  # type: ignore[override]
+        code = EXIT_OK
+        plan = None
         try:
+            logger.info("Starting cmd_convert_dir in worker")
             # The new cmd_convert_dir will return a tuple (exit_code, plan_summary)
             code, plan = cmd_convert_dir(
                 self.cfg,
@@ -183,9 +186,11 @@ class ConvertWorker(QtCore.QThread):
                 pause_event=self.pause_event,
                 interactive=False,
             )
+            logger.info(f"cmd_convert_dir completed with code {code}")
             if plan:
                 self.plan_ready.emit(plan)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Exception in ConvertWorker: {e}", exc_info=True)
             code = EXIT_WITH_FILE_ERRORS
         self.finished_with_code.emit(code)
 

@@ -2,6 +2,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Optional
+from loguru import logger
 
 class PacDB:
     """A resilient history and lookup layer for PAC."""
@@ -10,7 +11,6 @@ class PacDB:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = threading.local()
-        self.init_schema()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -22,97 +22,119 @@ class PacDB:
             self._conn.connection.execute("PRAGMA synchronous = NORMAL;")
         return self._conn.connection
 
-    def init_schema(self):
-        """Initializes the database schema."""
-        with self.conn:
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS source_files (
-                    md5 TEXT PRIMARY KEY,
-                    first_seen_ts INTEGER,
-                    last_seen_ts INTEGER,
-                    last_size INTEGER,
-                    last_mtime_ns INTEGER,
-                    content_sig_ver INTEGER DEFAULT 1
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS source_paths (
-                    id INTEGER PRIMARY KEY,
-                    md5 TEXT REFERENCES source_files(md5) ON DELETE CASCADE,
-                    rel_path TEXT NOT NULL,
-                    first_seen_ts INTEGER,
-                    last_seen_ts INTEGER,
-                    UNIQUE(md5, rel_path)
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS outputs (
-                    id INTEGER PRIMARY KEY,
-                    md5 TEXT REFERENCES source_files(md5) ON DELETE CASCADE,
-                    dest_rel TEXT NOT NULL,
-                    container TEXT CHECK(container IN ('mp4','opus')) NOT NULL,
-                    encoder TEXT,
-                    quality TEXT,
-                    pac_version TEXT,
-                    first_seen_ts INTEGER,
-                    last_seen_ts INTEGER,
-                    last_size INTEGER,
-                    last_mtime_ns INTEGER,
-                    last_seen_had_pac_tags INTEGER CHECK (last_seen_had_pac_tags IN (0,1)) DEFAULT 0,
-                    UNIQUE(md5, dest_rel)
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS observations (
-                    id INTEGER PRIMARY KEY,
-                    ts INTEGER NOT NULL,
-                    event TEXT NOT NULL,
-                    md5 TEXT,
-                    rel_path TEXT,
-                    dest_rel TEXT,
-                    details_json TEXT
-                )
-            """)
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_source_paths_rel ON source_paths(rel_path);")
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_outputs_dest_rel ON outputs(dest_rel);")
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_outputs_md5 ON outputs(md5);")
+    def ensure_schema(self):
+        """Ensure the database schema is up to date with migrations."""
+        # Core tables (CREATE IF NOT EXISTS)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_files (
+                md5 TEXT PRIMARY KEY,
+                first_seen_ts INTEGER,
+                last_seen_ts INTEGER,
+                last_size INTEGER,
+                last_mtime_ns INTEGER,
+                content_sig_ver INTEGER DEFAULT 1
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_paths (
+                id INTEGER PRIMARY KEY,
+                md5 TEXT REFERENCES source_files(md5) ON DELETE CASCADE,
+                rel_path TEXT NOT NULL,
+                first_seen_ts INTEGER,
+                last_seen_ts INTEGER,
+                UNIQUE(md5, rel_path)
+            )
+        """)
+        # Create outputs table if not exists (incremental migration)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS outputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                md5 TEXT REFERENCES source_files(md5) ON DELETE CASCADE,
+                dest_rel TEXT NOT NULL,
+                container TEXT CHECK(container IN ('mp4','opus')) NOT NULL,
+                encoder TEXT,
+                quality TEXT,
+                pac_version TEXT,
+                first_seen_ts INTEGER,
+                last_seen_ts INTEGER,
+                last_size INTEGER,
+                last_mtime_ns INTEGER,
+                last_seen_had_pac_tags INTEGER DEFAULT 0 CHECK (last_seen_had_pac_tags IN (0,1)),
+                UNIQUE(md5, dest_rel)
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS observations (
+                id INTEGER PRIMARY KEY,
+                ts INTEGER NOT NULL,
+                event TEXT NOT NULL,
+                md5 TEXT,
+                rel_path TEXT,
+                dest_rel TEXT,
+                details_json TEXT
+            )
+        """)
 
-            # FLAC library management tables
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS flac_checks (
-                    md5 TEXT PRIMARY KEY,
-                    last_test_ts INTEGER,
-                    test_ok INTEGER,
-                    test_msg TEXT,
-                    streaminfo_md5 TEXT,
-                    bit_depth INTEGER,
-                    sample_rate INTEGER,
-                    channels INTEGER
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS flac_policy (
-                    md5 TEXT PRIMARY KEY,
-                    compression_level INTEGER,
-                    last_compress_ts INTEGER,
-                    compression_tag TEXT
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS art_exports (
-                    md5 TEXT PRIMARY KEY,
-                    path TEXT,
-                    last_export_ts INTEGER,
-                    mime TEXT,
-                    size INTEGER
-                )
-            """)
+        # FLAC library management tables
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS flac_checks (
+                md5 TEXT PRIMARY KEY,
+                last_test_ts INTEGER,
+                test_ok INTEGER,
+                test_msg TEXT,
+                streaminfo_md5 TEXT,
+                bit_depth INTEGER,
+                sample_rate INTEGER,
+                channels INTEGER
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS flac_policy (
+                md5 TEXT PRIMARY KEY,
+                compression_level INTEGER,
+                last_compress_ts INTEGER,
+                compression_tag TEXT
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS art_exports (
+                md5 TEXT PRIMARY KEY,
+                path TEXT,
+                last_export_ts INTEGER,
+                mime TEXT,
+                size INTEGER
+            )
+        """)
+
+        # Indexes
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_source_paths_rel ON source_paths(rel_path);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_outputs_dest_rel ON outputs(dest_rel);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_outputs_md5 ON outputs(md5);")
+
+        # Schema migrations for existing databases
+        cursor = self.conn.cursor()
+        cursor.execute("PRAGMA table_info(outputs)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        # Add first_seen_ts if missing
+        if 'first_seen_ts' not in columns:
+            self.conn.execute("ALTER TABLE outputs ADD COLUMN first_seen_ts INTEGER;")
+            from loguru import logger
+            logger.info("DB migration: Added first_seen_ts column to outputs table")
+        
+        # Add last_seen_had_pac_tags if missing
+        if 'last_seen_had_pac_tags' not in columns:
+            self.conn.execute("ALTER TABLE outputs ADD COLUMN last_seen_had_pac_tags INTEGER DEFAULT 0;")
+            self.conn.execute("ALTER TABLE outputs ADD CHECK (last_seen_had_pac_tags IN (0,1));")
+            logger.info("DB migration: Added last_seen_had_pac_tags column to outputs table")
+
+        self.conn.commit()
 
     def begin(self):
         self.conn.execute("BEGIN;")

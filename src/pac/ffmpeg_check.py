@@ -16,7 +16,7 @@ class FFmpegStatus:
     ffmpeg_path: Optional[str] = None
     ffmpeg_version: Optional[str] = None
     has_libfdk_aac: Optional[bool] = None
-    has_libopus: Optional[bool] = None
+    has_libopus: bool = False
     error: Optional[str] = None
 
 
@@ -76,7 +76,7 @@ def probe_qaac(light: bool = True) -> QaacStatus:
     return QaacStatus(available=True, qaac_path=path, qaac_version=version, error=None)
 
 
-def probe_ffmpeg() -> FFmpegStatus:
+def probe_ffmpeg(check_aac: bool = False) -> FFmpegStatus:
     path = shutil.which("ffmpeg")
     if not path:
         return FFmpegStatus(available=False, error="ffmpeg not found in PATH")
@@ -85,17 +85,20 @@ def probe_ffmpeg() -> FFmpegStatus:
     rc_v, out_v, err_v = _run([path, "-version"])  # version printed to stdout
     version = out_v.splitlines()[0].strip() if out_v else None
 
-    # Encoders (stdout)
-    rc_e, out_e, err_e = _run([path, "-hide_banner", "-encoders"])  # encoders on stdout
+    # Always check for Opus (default format)
+    rc_e, out_e, err_e = _run([path, "-hide_banner", "-encoders"])
     encoders_text = (out_e or "").lower()
-    has_fdk = "libfdk_aac" in encoders_text
     has_opus = "libopus" in encoders_text
+
+    has_fdk = False
+    if check_aac:
+        has_fdk = "libfdk_aac" in encoders_text
 
     status = FFmpegStatus(
         available=(rc_v == 0),
         ffmpeg_path=path,
         ffmpeg_version=version,
-        has_libfdk_aac=(has_fdk if rc_e == 0 else False),
+        has_libfdk_aac=(has_fdk if rc_e == 0 and check_aac else None),
         has_libopus=(has_opus if rc_e == 0 else False),
         error=None if rc_v == 0 else (err_v or "ffmpeg -version failed"),
     )
@@ -124,5 +127,5 @@ def probe_fdkaac() -> FdkaacStatus:
 
 
 if __name__ == "__main__":
-    s = probe_ffmpeg()
+    s = probe_ffmpeg(check_aac=False)  # Default: only check Opus
     print(s)
