@@ -496,6 +496,116 @@ class LibraryTableModel(QtCore.QAbstractTableModel):
         return [self._filtered_files[r] for r in rows if 0 <= r < len(self._filtered_files)]
 
 
+class LibrarySettingsDialog(QtWidgets.QDialog):
+    """Modal dialog for library settings."""
+    
+    def __init__(self, settings: PacSettings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Library Settings")
+        self.setMinimumWidth(500)
+        self._setup_ui()
+    
+    def _setup_ui(self) -> None:
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Tab widget for organized settings
+        tabs = QtWidgets.QTabWidget()
+        layout.addWidget(tabs)
+        
+        # General tab
+        general_tab = QtWidgets.QWidget()
+        general_layout = QtWidgets.QFormLayout(general_tab)
+        
+        self.spin_compression = QtWidgets.QSpinBox()
+        self.spin_compression.setRange(0, 8)
+        self.spin_compression.setValue(self.settings.flac_target_compression)
+        self.spin_compression.setToolTip("FLAC compression level (0-8)")
+        general_layout.addRow("Target Compression:", self.spin_compression)
+        
+        self.chk_resample = QtWidgets.QCheckBox("Resample hi-res to CD quality")
+        self.chk_resample.setChecked(self.settings.flac_resample_to_cd)
+        general_layout.addRow("", self.chk_resample)
+        
+        self.combo_mirror_codec = QtWidgets.QComboBox()
+        self.combo_mirror_codec.addItems(["aac", "opus"])
+        self.combo_mirror_codec.setCurrentText(self.settings.lossy_mirror_codec or "aac")
+        general_layout.addRow("Mirror Codec:", self.combo_mirror_codec)
+        
+        tabs.addTab(general_tab, "General")
+        
+        # Artwork tab
+        art_tab = QtWidgets.QWidget()
+        art_layout = QtWidgets.QFormLayout(art_tab)
+        
+        self.edit_art_root = QtWidgets.QLineEdit()
+        self.edit_art_root.setText(str(self.settings.flac_art_root or ""))
+        self.edit_art_root.setPlaceholderText("Root directory for extracted artwork")
+        self.btn_art_root = QtWidgets.QPushButton("Browse…")
+        self.btn_art_root.clicked.connect(self._browse_art_root)
+        art_root_row = QtWidgets.QHBoxLayout()
+        art_root_row.addWidget(self.edit_art_root)
+        art_root_row.addWidget(self.btn_art_root)
+        art_layout.addRow("Art Root:", art_root_row)
+        
+        self.edit_art_pattern = QtWidgets.QLineEdit()
+        self.edit_art_pattern.setText(self.settings.flac_art_pattern or "")
+        self.edit_art_pattern.setPlaceholderText("{albumartist}/{album}/front.jpg")
+        art_layout.addRow("Art Pattern:", self.edit_art_pattern)
+        
+        tabs.addTab(art_tab, "Artwork")
+        
+        # Workers tab
+        workers_tab = QtWidgets.QWidget()
+        workers_layout = QtWidgets.QFormLayout(workers_tab)
+        
+        max_threads = max(1, QtCore.QThread.idealThreadCount() or 8)
+        
+        self.spin_flac_workers = QtWidgets.QSpinBox()
+        self.spin_flac_workers.setRange(1, max_threads)
+        self.spin_flac_workers.setValue(self.settings.flac_workers or max(1, max_threads // 2))
+        workers_layout.addRow("FLAC Workers:", self.spin_flac_workers)
+        
+        self.spin_analysis_workers = QtWidgets.QSpinBox()
+        self.spin_analysis_workers.setRange(1, max_threads)
+        self.spin_analysis_workers.setValue(self.settings.flac_analysis_workers or max_threads)
+        workers_layout.addRow("Analysis Workers:", self.spin_analysis_workers)
+        
+        self.spin_art_workers = QtWidgets.QSpinBox()
+        self.spin_art_workers.setRange(1, max_threads)
+        self.spin_art_workers.setValue(self.settings.flac_art_workers or min(4, max_threads))
+        workers_layout.addRow("Art Workers:", self.spin_art_workers)
+        
+        tabs.addTab(workers_tab, "Workers")
+        
+        # Dialog buttons
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def _browse_art_root(self) -> None:
+        start = self.edit_art_root.text() or str(Path.home())
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Art Root", start)
+        if d:
+            self.edit_art_root.setText(d)
+    
+    def get_values(self) -> dict:
+        """Return the current settings values."""
+        return {
+            "flac_target_compression": self.spin_compression.value(),
+            "flac_resample_to_cd": self.chk_resample.isChecked(),
+            "lossy_mirror_codec": self.combo_mirror_codec.currentText(),
+            "flac_art_root": self.edit_art_root.text().strip() or None,
+            "flac_art_pattern": self.edit_art_pattern.text().strip() or None,
+            "flac_workers": self.spin_flac_workers.value(),
+            "flac_analysis_workers": self.spin_analysis_workers.value(),
+            "flac_art_workers": self.spin_art_workers.value(),
+        }
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -701,234 +811,152 @@ class MainWindow(QtWidgets.QMainWindow):
         return box
 
     def _setup_library_tab(self) -> None:
-        """Setup the library management tab with granular operation controls."""
+        """Setup the library management tab with browser-first layout."""
         layout = QtWidgets.QVBoxLayout(self.library_tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
-        # Library path selector
-        form = QtWidgets.QFormLayout()
+        # === TOP BAR: Library paths + Settings button ===
+        top_bar = QtWidgets.QHBoxLayout()
+        top_bar.setSpacing(8)
+        
+        # Library root
+        top_bar.addWidget(QtWidgets.QLabel("Library:"))
         self.edit_lib_root = QtWidgets.QLineEdit()
-        self.edit_lib_root.setPlaceholderText("FLAC library root directory")
-        self.btn_lib_root = QtWidgets.QPushButton("Browse…")
-        lib_row = QtWidgets.QHBoxLayout()
-        lib_row.addWidget(self.edit_lib_root)
-        lib_row.addWidget(self.btn_lib_root)
-        form.addRow("Library Root:", self._wrap_row(lib_row))
-
-        # Mirror output selector
+        self.edit_lib_root.setPlaceholderText("FLAC library root")
+        self.btn_lib_root = QtWidgets.QPushButton("…")
+        self.btn_lib_root.setFixedWidth(30)
+        top_bar.addWidget(self.edit_lib_root, 2)
+        top_bar.addWidget(self.btn_lib_root)
+        
+        # Mirror output
+        top_bar.addWidget(QtWidgets.QLabel("Mirror:"))
         self.edit_mirror_out = QtWidgets.QLineEdit()
-        self.edit_mirror_out.setPlaceholderText("Optional: Auto-run convert-dir to this directory")
-        self.btn_mirror_out = QtWidgets.QPushButton("Browse…")
-        mirror_row = QtWidgets.QHBoxLayout()
-        mirror_row.addWidget(self.edit_mirror_out)
-        mirror_row.addWidget(self.btn_mirror_out)
-        form.addRow("Mirror Output:", self._wrap_row(mirror_row))
-        layout.addLayout(form)
+        self.edit_mirror_out.setPlaceholderText("Optional output dir")
+        self.btn_mirror_out = QtWidgets.QPushButton("…")
+        self.btn_mirror_out.setFixedWidth(30)
+        top_bar.addWidget(self.edit_mirror_out, 1)
+        top_bar.addWidget(self.btn_mirror_out)
+        
+        # Settings button
+        self.btn_lib_settings = QtWidgets.QPushButton("Settings…")
+        self.btn_lib_settings.setToolTip("Open library settings dialog")
+        top_bar.addWidget(self.btn_lib_settings)
+        
+        layout.addLayout(top_bar)
 
-        # Operations group - granular control
-        ops_group = QtWidgets.QGroupBox("Operations")
-        ops_layout = QtWidgets.QVBoxLayout(ops_group)
+        # === MAIN AREA: Horizontal splitter (operations panel + browser) ===
+        self.lib_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        
+        # --- LEFT: Compact operations panel ---
+        ops_widget = QtWidgets.QWidget()
+        ops_widget.setMaximumWidth(220)
+        ops_widget.setMinimumWidth(160)
+        ops_layout = QtWidgets.QVBoxLayout(ops_widget)
+        ops_layout.setContentsMargins(0, 0, 0, 0)
+        ops_layout.setSpacing(4)
+        
+        # Operations header
+        ops_header = QtWidgets.QLabel("<b>Operations</b>")
+        ops_layout.addWidget(ops_header)
         
         # Dry run toggle
-        self.chk_lib_dry_run = QtWidgets.QCheckBox("Dry Run (plan only, no changes)")
+        self.chk_lib_dry_run = QtWidgets.QCheckBox("Dry Run")
         self.chk_lib_dry_run.setChecked(False)
+        self.chk_lib_dry_run.setToolTip("Plan only, no changes")
         ops_layout.addWidget(self.chk_lib_dry_run)
         
-        # Operations grid with checkboxes and individual run buttons
-        ops_grid = QtWidgets.QGridLayout()
-        
-        # Integrity check
+        # Operation checkboxes (compact, no individual run buttons)
         self.chk_op_integrity = QtWidgets.QCheckBox("Integrity Check")
         self.chk_op_integrity.setChecked(True)
         self.chk_op_integrity.setToolTip("Test FLAC files for corruption")
-        self.btn_run_integrity = QtWidgets.QPushButton("Run")
-        self.btn_run_integrity.setFixedWidth(60)
-        self.btn_run_integrity.setToolTip("Run integrity check only")
-        ops_grid.addWidget(self.chk_op_integrity, 0, 0)
-        ops_grid.addWidget(self.btn_run_integrity, 0, 1)
+        ops_layout.addWidget(self.chk_op_integrity)
         
-        # Resample
         self.chk_op_resample = QtWidgets.QCheckBox("Resample to CD")
         self.chk_op_resample.setChecked(self.settings.flac_resample_to_cd)
-        self.chk_op_resample.setToolTip("Resample hi-res files to 16-bit/44.1kHz")
-        self.btn_run_resample = QtWidgets.QPushButton("Run")
-        self.btn_run_resample.setFixedWidth(60)
-        self.btn_run_resample.setToolTip("Run resample only")
-        ops_grid.addWidget(self.chk_op_resample, 1, 0)
-        ops_grid.addWidget(self.btn_run_resample, 1, 1)
+        self.chk_op_resample.setToolTip("Resample hi-res to 16-bit/44.1kHz")
+        ops_layout.addWidget(self.chk_op_resample)
         
-        # Recompress
         self.chk_op_recompress = QtWidgets.QCheckBox("Recompress FLAC")
         self.chk_op_recompress.setChecked(True)
-        self.chk_op_recompress.setToolTip("Recompress FLAC files to target compression level")
-        self.btn_run_recompress = QtWidgets.QPushButton("Run")
-        self.btn_run_recompress.setFixedWidth(60)
-        self.btn_run_recompress.setToolTip("Run recompress only")
-        ops_grid.addWidget(self.chk_op_recompress, 2, 0)
-        ops_grid.addWidget(self.btn_run_recompress, 2, 1)
+        self.chk_op_recompress.setToolTip("Recompress to target level")
+        ops_layout.addWidget(self.chk_op_recompress)
         
-        # Artwork extraction
         self.chk_op_artwork = QtWidgets.QCheckBox("Extract Artwork")
         self.chk_op_artwork.setChecked(True)
-        self.chk_op_artwork.setToolTip("Extract embedded artwork to files")
-        self.btn_run_artwork = QtWidgets.QPushButton("Run")
-        self.btn_run_artwork.setFixedWidth(60)
-        self.btn_run_artwork.setToolTip("Run artwork extraction only")
-        ops_grid.addWidget(self.chk_op_artwork, 3, 0)
-        ops_grid.addWidget(self.btn_run_artwork, 3, 1)
+        self.chk_op_artwork.setToolTip("Extract embedded artwork")
+        ops_layout.addWidget(self.chk_op_artwork)
         
-        # Adopt legacy files
-        self.chk_op_adopt = QtWidgets.QCheckBox("Adopt Legacy Files")
+        self.chk_op_adopt = QtWidgets.QCheckBox("Adopt Legacy")
         self.chk_op_adopt.setChecked(False)
-        self.chk_op_adopt.setToolTip("Add PAC_* tags to outputs without them (requires Mirror Output)")
-        self.btn_run_adopt = QtWidgets.QPushButton("Run")
-        self.btn_run_adopt.setFixedWidth(60)
-        self.btn_run_adopt.setToolTip("Run adopt legacy files only")
+        self.chk_op_adopt.setToolTip("Add PAC_* tags to outputs (requires Mirror)")
         self.lbl_adoptable_count = QtWidgets.QLabel("")
-        ops_grid.addWidget(self.chk_op_adopt, 4, 0)
-        ops_grid.addWidget(self.btn_run_adopt, 4, 1)
-        ops_grid.addWidget(self.lbl_adoptable_count, 4, 2)
+        adopt_row = QtWidgets.QHBoxLayout()
+        adopt_row.addWidget(self.chk_op_adopt)
+        adopt_row.addWidget(self.lbl_adoptable_count)
+        adopt_row.addStretch()
+        ops_layout.addLayout(adopt_row)
         
-        # Mirror update (depends on mirror output being set)
         self.chk_op_mirror = QtWidgets.QCheckBox("Update Mirror")
         self.chk_op_mirror.setChecked(False)
-        self.chk_op_mirror.setToolTip("Update lossy mirror after maintenance (requires Mirror Output)")
-        self.btn_run_mirror = QtWidgets.QPushButton("Run")
-        self.btn_run_mirror.setFixedWidth(60)
-        self.btn_run_mirror.setToolTip("Run mirror update only")
-        ops_grid.addWidget(self.chk_op_mirror, 5, 0)
-        ops_grid.addWidget(self.btn_run_mirror, 5, 1)
+        self.chk_op_mirror.setToolTip("Update lossy mirror (requires Mirror)")
+        ops_layout.addWidget(self.chk_op_mirror)
         
-        ops_layout.addLayout(ops_grid)
-        layout.addWidget(ops_group)
-
-        # Library settings
-        settings_group = QtWidgets.QGroupBox("Library Settings")
-        settings_layout = QtWidgets.QVBoxLayout(settings_group)
-
-        # Compression settings
-        comp_layout = QtWidgets.QHBoxLayout()
-        comp_layout.addWidget(QtWidgets.QLabel("Target Compression:"))
-        self.spin_lib_compression = QtWidgets.QSpinBox()
-        self.spin_lib_compression.setRange(0, 8)
-        self.spin_lib_compression.setValue(self.settings.flac_target_compression)
-        self.spin_lib_compression.setToolTip("FLAC compression level (0-8)")
-        comp_layout.addWidget(self.spin_lib_compression)
-        comp_layout.addStretch(1)
-        settings_layout.addLayout(comp_layout)
-    
-        # Artwork settings
-        art_layout = QtWidgets.QFormLayout()
-        self.edit_lib_art_root = QtWidgets.QLineEdit()
-        self.edit_lib_art_root.setText(str(self.settings.flac_art_root or ""))
-        self.edit_lib_art_root.setPlaceholderText("Root directory for extracted artwork")
-        self.btn_lib_art_root = QtWidgets.QPushButton("Browse…")
-        art_root_row = QtWidgets.QHBoxLayout()
-        art_root_row.addWidget(self.edit_lib_art_root)
-        art_root_row.addWidget(self.btn_lib_art_root)
-        art_layout.addRow("Art Root:", self._wrap_row(art_root_row))
-
-        self.edit_lib_art_pattern = QtWidgets.QLineEdit()
-        self.edit_lib_art_pattern.setText(self.settings.flac_art_pattern or "")
-        self.edit_lib_art_pattern.setPlaceholderText("Pattern for artwork paths (e.g. {albumartist}/{album}/front.jpg)")
-        art_layout.addRow("Art Pattern:", self.edit_lib_art_pattern)
-        settings_layout.addLayout(art_layout)
-
-        # Worker settings
-        workers_layout = QtWidgets.QGridLayout()
-        workers_layout.addWidget(QtWidgets.QLabel("FLAC Workers:"), 0, 0)
-        self.spin_lib_flac_workers = QtWidgets.QSpinBox()
-        self.spin_lib_flac_workers.setRange(1, max(1, (QtCore.QThread.idealThreadCount() or 8)))
-        self.spin_lib_flac_workers.setValue(self.settings.flac_workers or (QtCore.QThread.idealThreadCount() or 2))
-        workers_layout.addWidget(self.spin_lib_flac_workers, 0, 1)
-
-        workers_layout.addWidget(QtWidgets.QLabel("Analysis Workers:"), 0, 2)
-        self.spin_lib_analysis_workers = QtWidgets.QSpinBox()
-        self.spin_lib_analysis_workers.setRange(1, max(1, (QtCore.QThread.idealThreadCount() or 8)))
-        self.spin_lib_analysis_workers.setValue(self.settings.flac_analysis_workers or (QtCore.QThread.idealThreadCount() or 4))
-        workers_layout.addWidget(self.spin_lib_analysis_workers, 0, 3)
-
-        workers_layout.addWidget(QtWidgets.QLabel("Art Workers:"), 1, 0)
-        self.spin_lib_art_workers = QtWidgets.QSpinBox()
-        self.spin_lib_art_workers.setRange(1, max(1, (QtCore.QThread.idealThreadCount() or 8)))
-        self.spin_lib_art_workers.setValue(self.settings.flac_art_workers or min(QtCore.QThread.idealThreadCount() or 4, 4))
-        workers_layout.addWidget(self.spin_lib_art_workers, 1, 1)
-        settings_layout.addLayout(workers_layout)
-
-        # Mirror settings
-        mirror_settings_layout = QtWidgets.QHBoxLayout()
-        mirror_settings_layout.addWidget(QtWidgets.QLabel("Mirror Codec:"))
-        self.combo_lib_mirror_codec = QtWidgets.QComboBox()
-        self.combo_lib_mirror_codec.addItems(["aac", "opus"])
-        self.combo_lib_mirror_codec.setCurrentText(self.settings.lossy_mirror_codec or "aac")
-        mirror_settings_layout.addWidget(self.combo_lib_mirror_codec)
-        mirror_settings_layout.addStretch(1)
-        settings_layout.addLayout(mirror_settings_layout)
-
-        layout.addWidget(settings_group)
-
-        # Counters and issues panel
-        self.counters_group = QtWidgets.QGroupBox("Library Status")
-        counters_layout = QtWidgets.QVBoxLayout(self.counters_group)
-
-        # Status counters
-        status_layout = QtWidgets.QGridLayout()
-        self.lbl_lib_scanned = QtWidgets.QLabel("Scanned: 0")
-        self.lbl_lib_tested_ok = QtWidgets.QLabel("Integrity OK: 0")
-        self.lbl_lib_tested_err = QtWidgets.QLabel("Integrity Failed: 0")
-        self.lbl_lib_resampled = QtWidgets.QLabel("Resampled: 0")
-        self.lbl_lib_recompressed = QtWidgets.QLabel("Recompressed: 0")
-        self.lbl_lib_art_exported = QtWidgets.QLabel("Artwork Exported: 0")
-        self.lbl_lib_adopted = QtWidgets.QLabel("Adopted: 0")
-        self.lbl_lib_held = QtWidgets.QLabel("Held: 0")
-    
-        status_layout.addWidget(self.lbl_lib_scanned, 0, 0)
-        status_layout.addWidget(self.lbl_lib_tested_ok, 0, 1)
-        status_layout.addWidget(self.lbl_lib_tested_err, 0, 2)
-        status_layout.addWidget(self.lbl_lib_resampled, 1, 0)
-        status_layout.addWidget(self.lbl_lib_recompressed, 1, 1)
-        status_layout.addWidget(self.lbl_lib_art_exported, 1, 2)
-        status_layout.addWidget(self.lbl_lib_adopted, 2, 0)
-        status_layout.addWidget(self.lbl_lib_held, 2, 2)
-    
-        counters_layout.addLayout(status_layout)
+        ops_layout.addSpacing(8)
         
-        # Current operation progress
-        self.lbl_lib_current_op = QtWidgets.QLabel("")
-        counters_layout.addWidget(self.lbl_lib_current_op)
-    
-        # Issues panel
-        issues_group = QtWidgets.QGroupBox("Issues")
-        issues_layout = QtWidgets.QVBoxLayout(issues_group)
-        self.lib_issues_list = QtWidgets.QListWidget()
-        self.lib_issues_list.setMaximumHeight(100)
-        issues_layout.addWidget(self.lib_issues_list)
-        counters_layout.addWidget(issues_group)
-
-        # Browser panel
-        browser_group = QtWidgets.QGroupBox("Library Browser")
-        browser_layout = QtWidgets.QVBoxLayout(browser_group)
+        # Scope control
+        scope_label = QtWidgets.QLabel("<b>Scope</b>")
+        ops_layout.addWidget(scope_label)
         
-        # Statistics bar (clickable to filter)
+        self.radio_scope_library = QtWidgets.QRadioButton("Entire Library")
+        self.radio_scope_library.setChecked(True)
+        self.radio_scope_selection = QtWidgets.QRadioButton("Selection Only")
+        self.radio_scope_selection.setToolTip("Run on selected files in browser")
+        ops_layout.addWidget(self.radio_scope_library)
+        ops_layout.addWidget(self.radio_scope_selection)
+        
+        ops_layout.addStretch()
+        
+        # Run button
+        self.btn_lib_run = QtWidgets.QPushButton("Run")
+        self.btn_lib_run.setToolTip("Run checked operations")
+        self.btn_lib_run.setMinimumHeight(32)
+        ops_layout.addWidget(self.btn_lib_run)
+        
+        # Pause/Cancel (hidden by default)
+        self.btn_lib_pause = QtWidgets.QPushButton("Pause")
+        self.btn_lib_pause.hide()
+        ops_layout.addWidget(self.btn_lib_pause)
+        self.btn_lib_cancel = QtWidgets.QPushButton("Cancel")
+        self.btn_lib_cancel.hide()
+        ops_layout.addWidget(self.btn_lib_cancel)
+        
+        self.lib_splitter.addWidget(ops_widget)
+        
+        # --- RIGHT: Browser panel (primary workspace) ---
+        browser_widget = QtWidgets.QWidget()
+        browser_layout = QtWidgets.QVBoxLayout(browser_widget)
+        browser_layout.setContentsMargins(0, 0, 0, 0)
+        browser_layout.setSpacing(4)
+        
+        # Statistics bar (compact, clickable to filter)
         stats_bar = QtWidgets.QHBoxLayout()
+        stats_bar.setSpacing(2)
         self.btn_stat_total = QtWidgets.QPushButton("Total: 0")
         self.btn_stat_total.setFlat(True)
-        self.btn_stat_total.setToolTip("Click to show all files")
+        self.btn_stat_total.setToolTip("Show all files")
         self.btn_stat_hires = QtWidgets.QPushButton("Hi-Res: 0")
         self.btn_stat_hires.setFlat(True)
-        self.btn_stat_hires.setToolTip("Click to filter hi-res files")
+        self.btn_stat_hires.setToolTip("Filter hi-res files")
         self.btn_stat_integrity_unknown = QtWidgets.QPushButton("Untested: 0")
         self.btn_stat_integrity_unknown.setFlat(True)
-        self.btn_stat_integrity_unknown.setToolTip("Click to filter files never integrity tested")
         self.btn_stat_integrity_failed = QtWidgets.QPushButton("Failed: 0")
         self.btn_stat_integrity_failed.setFlat(True)
         self.btn_stat_integrity_failed.setStyleSheet("color: red;")
-        self.btn_stat_integrity_failed.setToolTip("Click to filter integrity-failed files")
-        self.btn_stat_needs_recompress = QtWidgets.QPushButton("Needs Recompress: 0")
+        self.btn_stat_needs_recompress = QtWidgets.QPushButton("Recompress: 0")
         self.btn_stat_needs_recompress.setFlat(True)
-        self.btn_stat_needs_recompress.setToolTip("Click to filter files needing recompression")
         self.btn_stat_legacy = QtWidgets.QPushButton("Legacy: 0")
         self.btn_stat_legacy.setFlat(True)
-        self.btn_stat_legacy.setToolTip("Click to filter legacy output files without PAC tags")
         
         stats_bar.addWidget(self.btn_stat_total)
         stats_bar.addWidget(self.btn_stat_hires)
@@ -939,29 +967,26 @@ class MainWindow(QtWidgets.QMainWindow):
         stats_bar.addStretch(1)
         browser_layout.addLayout(stats_bar)
         
-        # Filter controls
+        # Filter + Scan row
         filter_row = QtWidgets.QHBoxLayout()
         filter_row.addWidget(QtWidgets.QLabel("Filter:"))
         self.combo_browser_filter = QtWidgets.QComboBox()
         self.combo_browser_filter.addItems([
-            "All Files",
-            "Needs Action",
-            "Hi-Res Only",
-            "Integrity Unknown",
-            "Integrity Failed",
-            "Needs Recompress",
-            "Legacy (No PAC tags)",
+            "All Files", "Needs Action", "Hi-Res Only",
+            "Integrity Unknown", "Integrity Failed",
+            "Needs Recompress", "Legacy (No PAC tags)",
         ])
         filter_row.addWidget(self.combo_browser_filter)
-        self.btn_browser_clear_filter = QtWidgets.QPushButton("Clear Filter")
+        self.btn_browser_clear_filter = QtWidgets.QPushButton("Clear")
+        self.btn_browser_clear_filter.setFixedWidth(50)
         filter_row.addWidget(self.btn_browser_clear_filter)
         filter_row.addStretch(1)
         self.btn_browser_scan = QtWidgets.QPushButton("Scan Library")
-        self.btn_browser_scan.setToolTip("Scan library to populate browser (non-destructive)")
+        self.btn_browser_scan.setToolTip("Scan library (non-destructive)")
         filter_row.addWidget(self.btn_browser_scan)
         browser_layout.addLayout(filter_row)
         
-        # Table view for files
+        # Table view (primary workspace)
         self.browser_table = QtWidgets.QTableView()
         self.browser_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.browser_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -971,39 +996,107 @@ class MainWindow(QtWidgets.QMainWindow):
         self.browser_table.horizontalHeader().setStretchLastSection(True)
         self.browser_table.verticalHeader().setVisible(False)
         
-        # Set up table model
         self.browser_model = LibraryTableModel(self)
         self.browser_proxy_model = QtCore.QSortFilterProxyModel(self)
         self.browser_proxy_model.setSourceModel(self.browser_model)
         self.browser_table.setModel(self.browser_proxy_model)
         
-        browser_layout.addWidget(self.browser_table, 1)  # stretch factor 1 to expand
+        browser_layout.addWidget(self.browser_table, 1)
         
-        # Selection info and actions
+        # Selection info row
         selection_row = QtWidgets.QHBoxLayout()
         self.lbl_browser_selection = QtWidgets.QLabel("Selected: 0 files")
         selection_row.addWidget(self.lbl_browser_selection)
         selection_row.addStretch(1)
         self.btn_browser_run_integrity = QtWidgets.QPushButton("Run Integrity")
-        self.btn_browser_run_integrity.setToolTip("Run integrity check on selected files")
         self.btn_browser_run_integrity.setEnabled(False)
         self.btn_browser_run_adopt = QtWidgets.QPushButton("Adopt Selected")
-        self.btn_browser_run_adopt.setToolTip("Adopt selected legacy files")
         self.btn_browser_run_adopt.setEnabled(False)
         selection_row.addWidget(self.btn_browser_run_integrity)
         selection_row.addWidget(self.btn_browser_run_adopt)
         browser_layout.addLayout(selection_row)
         
-        layout.addWidget(browser_group, 1)  # stretch factor 1 to expand
+        self.lib_splitter.addWidget(browser_widget)
         
-        # Connect browser signals
+        # Set splitter sizes (operations panel narrow, browser wide)
+        self.lib_splitter.setSizes([180, 600])
+        self.lib_splitter.setStretchFactor(0, 0)
+        self.lib_splitter.setStretchFactor(1, 1)
+        
+        layout.addWidget(self.lib_splitter, 1)
+
+        # === COLLAPSIBLE DETAILS AREA ===
+        self.details_toggle = QtWidgets.QPushButton("▶ Details")
+        self.details_toggle.setFlat(True)
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setChecked(False)
+        self.details_toggle.setToolTip("Show/hide operation details and issues")
+        layout.addWidget(self.details_toggle)
+        
+        self.details_widget = QtWidgets.QWidget()
+        self.details_widget.setVisible(False)
+        details_layout = QtWidgets.QVBoxLayout(self.details_widget)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Status counters
+        self.counters_group = QtWidgets.QGroupBox("Status")
+        counters_layout = QtWidgets.QVBoxLayout(self.counters_group)
+        
+        status_grid = QtWidgets.QGridLayout()
+        self.lbl_lib_scanned = QtWidgets.QLabel("Scanned: 0")
+        self.lbl_lib_tested_ok = QtWidgets.QLabel("Integrity OK: 0")
+        self.lbl_lib_tested_err = QtWidgets.QLabel("Integrity Failed: 0")
+        self.lbl_lib_resampled = QtWidgets.QLabel("Resampled: 0")
+        self.lbl_lib_recompressed = QtWidgets.QLabel("Recompressed: 0")
+        self.lbl_lib_art_exported = QtWidgets.QLabel("Art Exported: 0")
+        self.lbl_lib_adopted = QtWidgets.QLabel("Adopted: 0")
+        self.lbl_lib_held = QtWidgets.QLabel("Held: 0")
+        
+        status_grid.addWidget(self.lbl_lib_scanned, 0, 0)
+        status_grid.addWidget(self.lbl_lib_tested_ok, 0, 1)
+        status_grid.addWidget(self.lbl_lib_tested_err, 0, 2)
+        status_grid.addWidget(self.lbl_lib_resampled, 0, 3)
+        status_grid.addWidget(self.lbl_lib_recompressed, 1, 0)
+        status_grid.addWidget(self.lbl_lib_art_exported, 1, 1)
+        status_grid.addWidget(self.lbl_lib_adopted, 1, 2)
+        status_grid.addWidget(self.lbl_lib_held, 1, 3)
+        counters_layout.addLayout(status_grid)
+        
+        self.lbl_lib_current_op = QtWidgets.QLabel("")
+        counters_layout.addWidget(self.lbl_lib_current_op)
+        
+        details_layout.addWidget(self.counters_group)
+        
+        # Issues list
+        issues_group = QtWidgets.QGroupBox("Issues")
+        issues_layout = QtWidgets.QVBoxLayout(issues_group)
+        self.lib_issues_list = QtWidgets.QListWidget()
+        self.lib_issues_list.setMaximumHeight(80)
+        issues_layout.addWidget(self.lib_issues_list)
+        details_layout.addWidget(issues_group)
+        
+        layout.addWidget(self.details_widget)
+
+        # === CONNECT SIGNALS ===
+        # Top bar
+        self.btn_lib_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_root))
+        self.btn_mirror_out.clicked.connect(lambda: self._pick_dir(self.edit_mirror_out))
+        self.btn_lib_settings.clicked.connect(self._on_lib_settings)
+        
+        # Operations
+        self.btn_lib_run.clicked.connect(self.on_lib_run)
+        self.btn_lib_cancel.clicked.connect(self.on_lib_cancel)
+        self.btn_lib_pause.clicked.connect(self.on_lib_pause_resume)
+        self.edit_mirror_out.textChanged.connect(self._update_mirror_dependent_ops)
+        
+        # Browser
         self.btn_browser_scan.clicked.connect(self.on_browser_scan)
         self.combo_browser_filter.currentTextChanged.connect(self._on_browser_filter_change)
         self.btn_browser_clear_filter.clicked.connect(self._on_browser_clear_filter)
         self.browser_table.selectionModel().selectionChanged.connect(self._on_browser_selection_changed)
         self.browser_table.customContextMenuRequested.connect(self._on_browser_context_menu)
         
-        # Connect statistics buttons to filters
+        # Stats buttons to filters
         self.btn_stat_total.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("All Files"))
         self.btn_stat_hires.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Hi-Res Only"))
         self.btn_stat_integrity_unknown.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Integrity Unknown"))
@@ -1011,55 +1104,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stat_needs_recompress.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Needs Recompress"))
         self.btn_stat_legacy.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Legacy (No PAC tags)"))
         
-        # Connect selection-based action buttons
+        # Selection actions
         self.btn_browser_run_integrity.clicked.connect(self._on_browser_run_integrity)
         self.btn_browser_run_adopt.clicked.connect(self._on_browser_run_adopt)
-
-        # Action buttons
-        actions = QtWidgets.QHBoxLayout()
-        self.btn_lib_scan_adoptable = QtWidgets.QPushButton("Scan Adoptable")
-        self.btn_lib_scan_adoptable.setToolTip("Scan mirror output for files without PAC_* tags")
-        self.btn_lib_run = QtWidgets.QPushButton("Run Selected")
-        self.btn_lib_run.setToolTip("Run all checked operations")
-        self.btn_lib_cancel = QtWidgets.QPushButton("Cancel")
-        self.btn_lib_cancel.hide()
-        self.btn_lib_pause = QtWidgets.QPushButton("Pause")
-        self.btn_lib_pause.hide()
-
-        actions.addStretch(1)
-        actions.addWidget(self.btn_lib_scan_adoptable)
-        actions.addWidget(self.btn_lib_run)
-        actions.addWidget(self.btn_lib_pause)
-        actions.addWidget(self.btn_lib_cancel)
-        layout.addLayout(actions)
-
-        # Connect library tab signals
-        self.btn_lib_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_root))
-        self.btn_lib_art_root.clicked.connect(lambda: self._pick_dir(self.edit_lib_art_root))
-        self.btn_mirror_out.clicked.connect(lambda: self._pick_dir(self.edit_mirror_out))
-        self.btn_lib_run.clicked.connect(self.on_lib_run)
-        self.btn_lib_cancel.clicked.connect(self.on_lib_cancel)
-        self.btn_lib_pause.clicked.connect(self.on_lib_pause_resume)
-        self.btn_lib_scan_adoptable.clicked.connect(self.on_scan_adoptable)
         
-        # Connect individual operation run buttons
-        self.btn_run_integrity.clicked.connect(lambda: self._run_single_op(PHASE_INTEGRITY))
-        self.btn_run_resample.clicked.connect(lambda: self._run_single_op(PHASE_RESAMPLE))
-        self.btn_run_recompress.clicked.connect(lambda: self._run_single_op(PHASE_RECOMPRESS))
-        self.btn_run_artwork.clicked.connect(lambda: self._run_single_op(PHASE_ARTWORK))
-        self.btn_run_adopt.clicked.connect(lambda: self._run_single_op(PHASE_ADOPT))
-        self.btn_run_mirror.clicked.connect(lambda: self._run_single_op(PHASE_MIRROR))
+        # Details toggle
+        self.details_toggle.toggled.connect(self._on_details_toggle)
         
-        # Enable/disable adopt and mirror based on mirror output
-        self.edit_mirror_out.textChanged.connect(self._update_mirror_dependent_ops)
+        # Update scope when selection changes
+        self.browser_table.selectionModel().selectionChanged.connect(self._on_selection_scope_update)
+
+    def _on_lib_settings(self) -> None:
+        """Open library settings modal dialog."""
+        dialog = LibrarySettingsDialog(self.settings, self)
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            values = dialog.get_values()
+            self._lib_settings_cache = values
+            logger.info("Library settings updated")
+    
+    def _on_details_toggle(self, checked: bool) -> None:
+        """Toggle details panel visibility."""
+        self.details_widget.setVisible(checked)
+        self.details_toggle.setText("▼ Details" if checked else "▶ Details")
+    
+    def _on_selection_scope_update(self) -> None:
+        """Update scope radio when selection changes."""
+        indexes = self.browser_table.selectionModel().selectedRows()
+        if len(indexes) > 0:
+            self.radio_scope_selection.setChecked(True)
+    
+    def _get_lib_settings_overrides(self) -> dict:
+        """Get library settings from cache or defaults."""
+        if hasattr(self, "_lib_settings_cache"):
+            return self._lib_settings_cache
+        return {
+            "flac_target_compression": self.settings.flac_target_compression,
+            "flac_resample_to_cd": self.chk_op_resample.isChecked(),
+            "lossy_mirror_codec": self.settings.lossy_mirror_codec or "aac",
+            "flac_art_root": self.settings.flac_art_root,
+            "flac_art_pattern": self.settings.flac_art_pattern,
+            "flac_workers": self.settings.flac_workers,
+            "flac_analysis_workers": self.settings.flac_analysis_workers,
+            "flac_art_workers": self.settings.flac_art_workers,
+        }
 
     def _update_mirror_dependent_ops(self) -> None:
         """Enable/disable adopt and mirror operations based on mirror output path."""
         has_mirror = bool(self.edit_mirror_out.text().strip())
         self.chk_op_adopt.setEnabled(has_mirror)
         self.chk_op_mirror.setEnabled(has_mirror)
-        self.btn_run_adopt.setEnabled(has_mirror)
-        self.btn_run_mirror.setEnabled(has_mirror)
         if not has_mirror:
             self.chk_op_adopt.setChecked(False)
             self.chk_op_mirror.setChecked(False)
@@ -1214,17 +1307,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mirror_out = self.edit_mirror_out.text().strip() if self.edit_mirror_out.text().strip() else None
 
-        # Update settings with library-specific values
-        lib_overrides = {
-            "flac_target_compression": self.spin_lib_compression.value(),
-            "flac_resample_to_cd": self.chk_op_resample.isChecked(),
-            "flac_art_root": self.edit_lib_art_root.text().strip() if self.edit_lib_art_root.text().strip() else None,
-            "flac_art_pattern": self.edit_lib_art_pattern.text().strip() or None,
-            "flac_workers": self.spin_lib_flac_workers.value(),
-            "flac_analysis_workers": self.spin_lib_analysis_workers.value(),
-            "flac_art_workers": self.spin_lib_art_workers.value(),
-            "lossy_mirror_codec": self.combo_lib_mirror_codec.currentText(),
-        }
+        # Update settings with library-specific values from modal dialog cache
+        lib_overrides = self._get_lib_settings_overrides()
 
         # Apply overrides to settings
         lib_settings = self.settings.model_copy(update=lib_overrides)
@@ -1305,23 +1389,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _disable_lib_ui(self) -> None:
         """Disable library UI during operation."""
-        # Hide action buttons and browse buttons
-        widgets_to_hide = [
-            self.btn_lib_run, self.btn_lib_scan_adoptable,
-            self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out,
-            self.btn_run_integrity, self.btn_run_resample, self.btn_run_recompress,
-            self.btn_run_artwork, self.btn_run_adopt, self.btn_run_mirror,
-        ]
-        for w in widgets_to_hide:
-            w.hide()
-        
-        # Show pause/cancel
+        # Hide Run button, show pause/cancel
+        self.btn_lib_run.hide()
         self.btn_lib_pause.show()
         self.btn_lib_cancel.show()
         self.btn_lib_pause.setEnabled(True)
         self.btn_lib_cancel.setEnabled(True)
         self.btn_lib_pause.setText("Pause")
         self.progress.show()
+        
+        # Auto-expand details area during run
+        self.details_toggle.setChecked(True)
 
     def _reenable_lib_ui(self) -> None:
         """Re-enable library UI after operation."""
@@ -1330,16 +1408,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_lib_cancel.hide()
         self.lbl_lib_current_op.setText("")
         
-        # Show action buttons and browse buttons
-        widgets_to_show = [
-            self.btn_lib_run, self.btn_lib_scan_adoptable,
-            self.btn_lib_root, self.btn_lib_art_root, self.btn_mirror_out,
-            self.btn_run_integrity, self.btn_run_resample, self.btn_run_recompress,
-            self.btn_run_artwork, self.btn_run_adopt, self.btn_run_mirror,
-        ]
-        for w in widgets_to_show:
-            w.show()
-            w.setEnabled(True)
+        # Show Run button
+        self.btn_lib_run.show()
+        self.btn_lib_run.setEnabled(True)
         
         # Re-apply mirror-dependent state
         self._update_mirror_dependent_ops()
