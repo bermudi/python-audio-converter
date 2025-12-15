@@ -630,6 +630,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Python Audio Converter")
         self.resize(1000, 700)
 
+        self._ui_settings = QtCore.QSettings("python-audio-converter", "gui")
+        self._log_collapsed = bool(self._ui_settings.value("log_collapsed", False, type=bool))
+        self._log_last_sizes: Optional[list[int]] = None
+
         # Load defaults
         self.settings = PacSettings.load()
         # Encoder selected by preflight: one of None, "libfdk_aac", "qaac", "fdkaac"
@@ -640,9 +644,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         outer = QtWidgets.QVBoxLayout(central)
 
+        self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        outer.addWidget(self.main_splitter, 1)
+
+        top = QtWidgets.QWidget()
+        top_outer = QtWidgets.QVBoxLayout(top)
+        top_outer.setContentsMargins(0, 0, 0, 0)
+        top_outer.setSpacing(0)
+
         # Create tab widget
         self.tabs = QtWidgets.QTabWidget()
-        outer.addWidget(self.tabs, 1)
+        top_outer.addWidget(self.tabs, 1)
 
         # Library tab (main tab)
         self.library_tab = QtWidgets.QWidget()
@@ -655,7 +667,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_convert_tab()
 
         # Shared components
-        self._setup_shared_components(outer)
+        self._setup_shared_components(top_outer)
+
+        self._setup_log_panel()
+
+        self.main_splitter.addWidget(top)
+        self.main_splitter.addWidget(self.log)
+        self.main_splitter.setCollapsible(0, False)
+        self.main_splitter.setCollapsible(1, True)
+
+        saved_sizes = self._ui_settings.value("main_splitter_sizes", None)
+        if isinstance(saved_sizes, list) and all(isinstance(x, int) for x in saved_sizes) and len(saved_sizes) == 2:
+            self.main_splitter.setSizes(saved_sizes)
+            self._log_last_sizes = saved_sizes
+        else:
+            self.main_splitter.setSizes([750, 200])
+            self._log_last_sizes = [750, 200]
+
+        if self._log_collapsed:
+            self._collapse_log(store_size=False)
 
         # Connections
         self.btn_recheck_encoders.clicked.connect(self.on_preflight)
@@ -1682,18 +1712,73 @@ class MainWindow(QtWidgets.QMainWindow):
         self.aac_pref_row.hide()  # Hidden until multiple encoders detected
         outer.addWidget(self.aac_pref_row)
 
-        # Progress + log
+        # Progress
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.hide()
         outer.addWidget(self.progress)
 
+        # Log toggle row (stays visible even when log is collapsed)
+        log_toggle_row = QtWidgets.QHBoxLayout()
+        self.btn_toggle_log = QtWidgets.QToolButton()
+        self.btn_toggle_log.setCheckable(True)
+        self.btn_toggle_log.setChecked(not self._log_collapsed)
+        self.btn_toggle_log.setToolTip("Show/hide the log panel")
+        self.btn_toggle_log.clicked.connect(self._toggle_log)
+        log_toggle_row.addWidget(self.btn_toggle_log)
+        log_toggle_row.addStretch(1)
+        outer.addLayout(log_toggle_row)
+
+    def _setup_log_panel(self) -> None:
+        self._update_log_toggle_text()
         self.log = QtWidgets.QTextEdit(readOnly=True)
         self.log.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        outer.addWidget(self.log, 1)
+
+    def _update_log_toggle_text(self) -> None:
+        if self._log_collapsed:
+            self.btn_toggle_log.setText("▶ Log")
+        else:
+            self.btn_toggle_log.setText("▼ Log")
+
+    def _toggle_log(self) -> None:
+        if self._log_collapsed:
+            self._expand_log()
+        else:
+            self._collapse_log()
+
+    def _collapse_log(self, *, store_size: bool = True) -> None:
+        if store_size:
+            sizes = self.main_splitter.sizes()
+            if isinstance(sizes, list) and len(sizes) == 2 and sizes[1] > 0:
+                self._log_last_sizes = sizes
+        self._log_collapsed = True
+        self.btn_toggle_log.setChecked(False)
+        self._update_log_toggle_text()
+        self.main_splitter.setSizes([1, 0])
+        self._ui_settings.setValue("log_collapsed", True)
+
+    def _expand_log(self) -> None:
+        self._log_collapsed = False
+        self.btn_toggle_log.setChecked(True)
+        self._update_log_toggle_text()
+        sizes = self._log_last_sizes
+        if not (isinstance(sizes, list) and len(sizes) == 2 and sizes[1] > 0):
+            sizes = [600, 150]
+        self.main_splitter.setSizes(sizes)
+        self._ui_settings.setValue("log_collapsed", False)
 
     def append_log(self, line: str) -> None:
         self.log.append(line)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        sizes = self.main_splitter.sizes()
+        if isinstance(sizes, list) and len(sizes) == 2:
+            if self._log_collapsed and self._log_last_sizes:
+                self._ui_settings.setValue("main_splitter_sizes", self._log_last_sizes)
+            else:
+                self._ui_settings.setValue("main_splitter_sizes", sizes)
+        self._ui_settings.setValue("log_collapsed", self._log_collapsed)
+        return super().closeEvent(event)
 
     def _pick_dir(self, target: QtWidgets.QLineEdit) -> None:
         start = target.text() or str(Path.home())
