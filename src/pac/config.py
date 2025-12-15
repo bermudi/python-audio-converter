@@ -66,6 +66,10 @@ class PacSettings(BaseSettings):
         default=100, description="Confidence threshold for auto-renaming a file"
     )
 
+    # Wine/encoder probing
+    probe_wine_encoders: bool = Field(default=False, description="Probe Wine-based encoders (qaac) on startup")
+    aac_encoder_preference: Optional[str] = Field(default=None, description="Preferred AAC encoder (libfdk_aac, qaac, fdkaac)")
+
     # FLAC Library management
     flac_target_compression: int = Field(default=8, description="Target FLAC compression level (0-8)")
     flac_resample_to_cd: bool = Field(default=True, description="Resample hi-res FLAC to CD quality (44.1kHz, 16-bit, 2ch)")
@@ -172,6 +176,9 @@ def cli_overrides_from_args(args: Any) -> Dict[str, Any]:
         "db_prune_grace_days",
         "db_auto_adopt_confidence",
         "db_auto_rename_confidence",
+        # Encoder probing
+        "probe_wine_encoders",
+        "aac_encoder_preference",
         # FLAC settings
         "flac_target_compression",
         "flac_resample_to_cd",

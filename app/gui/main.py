@@ -73,14 +73,28 @@ class PreflightWorker(QtCore.QThread):
     result = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
+    def __init__(self, skip_wine: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self.skip_wine = skip_wine
+
     def run(self) -> None:  # type: ignore[override]
         try:
-            st = probe_ffmpeg()
-            st_qa = probe_qaac(light=False)
+            st = probe_ffmpeg(check_aac=True)
             st_fd = probe_fdkaac()
+            
+            # Only probe qaac if not skipping Wine encoders
+            if self.skip_wine:
+                st_qa_available = False
+                st_qa_version = None
+                st_qa_path = None
+            else:
+                st_qa = probe_qaac(light=False)
+                st_qa_available = st_qa.available
+                st_qa_version = st_qa.qaac_version if st_qa.available else None
+                st_qa_path = st_qa.qaac_path
 
             # An encoder is OK if we have a way to encode either AAC or Opus
-            aac_ok = st.available and (st.has_libfdk_aac or st_qa.available or st_fd.available)
+            aac_ok = st.available and (st.has_libfdk_aac or st_qa_available or st_fd.available)
             opus_ok = st.available and st.has_libopus
             ok = aac_ok or opus_ok
 
@@ -89,11 +103,12 @@ class PreflightWorker(QtCore.QThread):
                 "ffmpeg_path": st.ffmpeg_path,
                 "libfdk_aac": bool(st.has_libfdk_aac),
                 "libopus": bool(st.has_libopus),
-                "qaac": st_qa.qaac_version if st_qa.available else None,
-                "qaac_path": st_qa.qaac_path,
+                "qaac": st_qa_version,
+                "qaac_path": st_qa_path,
                 "fdkaac": st_fd.fdkaac_version if st_fd.available else None,
                 "fdkaac_path": st_fd.fdkaac_path,
                 "ok": ok,
+                "wine_skipped": self.skip_wine,
             }
             self.result.emit(res)
         except Exception as e:  # pragma: no cover
@@ -1641,10 +1656,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_recheck_encoders = QtWidgets.QPushButton("Re-check Encoders")
         self.btn_recheck_encoders.setToolTip("Re-run encoder detection")
         self.btn_recheck_encoders.setEnabled(False)  # Disabled during auto-preflight
+        
+        # Wine encoder probe button (shown when Wine probing is skipped)
+        self.btn_check_wine = QtWidgets.QPushButton("Check Wine Encoders")
+        self.btn_check_wine.setToolTip("Probe Wine-based encoders (qaac) - may trigger Wine dialogs")
+        self.btn_check_wine.clicked.connect(self._on_check_wine_encoders)
+        self.btn_check_wine.hide()  # Hidden by default, shown after startup preflight if Wine was skipped
+        
         encoder_row.addWidget(self.lbl_encoder_icon)
         encoder_row.addWidget(self.lbl_preflight, 1)
+        encoder_row.addWidget(self.btn_check_wine)
         encoder_row.addWidget(self.btn_recheck_encoders)
         outer.addLayout(encoder_row)
+        
+        # AAC encoder preference row (shown when multiple AAC encoders available)
+        self.aac_pref_row = QtWidgets.QWidget()
+        aac_pref_layout = QtWidgets.QHBoxLayout(self.aac_pref_row)
+        aac_pref_layout.setContentsMargins(0, 0, 0, 0)
+        aac_pref_layout.addWidget(QtWidgets.QLabel("AAC Encoder:"))
+        self.combo_aac_encoder = QtWidgets.QComboBox()
+        self.combo_aac_encoder.setToolTip("Select preferred AAC encoder")
+        self.combo_aac_encoder.currentTextChanged.connect(self._on_aac_encoder_changed)
+        aac_pref_layout.addWidget(self.combo_aac_encoder)
+        aac_pref_layout.addStretch(1)
+        self.aac_pref_row.hide()  # Hidden until multiple encoders detected
+        outer.addWidget(self.aac_pref_row)
 
         # Progress + log
         self.progress = QtWidgets.QProgressBar()
@@ -1667,22 +1703,50 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _auto_preflight(self) -> None:
         """Auto-run preflight check on startup."""
-        logger.info("Auto-running preflight check...")
-        self.on_preflight()
+        skip_wine = not self.settings.probe_wine_encoders
+        if skip_wine:
+            logger.info("Auto-running preflight check (skipping Wine encoders)...")
+        else:
+            logger.info("Auto-running preflight check...")
+        self._run_preflight(skip_wine=skip_wine)
 
     def on_preflight(self) -> None:
-        """Run preflight encoder detection."""
+        """Re-run preflight encoder detection (respects setting)."""
+        skip_wine = not self.settings.probe_wine_encoders
+        self._run_preflight(skip_wine=skip_wine)
+
+    def _on_check_wine_encoders(self) -> None:
+        """Manually probe Wine-based encoders (qaac)."""
+        logger.info("Probing Wine encoders (qaac)...")
+        self._run_preflight(skip_wine=False)
+
+    def _run_preflight(self, skip_wine: bool) -> None:
+        """Run preflight encoder detection with optional Wine skip."""
         self.btn_recheck_encoders.setEnabled(False)
+        self.btn_check_wine.setEnabled(False)
         self.lbl_preflight.setText("Checking encoders...")
         self.lbl_encoder_icon.setText("⏳")
-        self.pf = PreflightWorker()
+        self.pf = PreflightWorker(skip_wine=skip_wine)
         self.pf.result.connect(self._on_preflight_ok)
         self.pf.failed.connect(self._on_preflight_err)
-        self.pf.finished.connect(lambda: self.btn_recheck_encoders.setEnabled(True))
+        self.pf.finished.connect(self._on_preflight_finished)
         self.pf.start()
+
+    def _on_preflight_finished(self) -> None:
+        """Re-enable preflight buttons after check completes."""
+        self.btn_recheck_encoders.setEnabled(True)
+        self.btn_check_wine.setEnabled(True)
 
     def _on_preflight_ok(self, res: dict) -> None:
         self.preflight_results = res
+        wine_skipped = res.get("wine_skipped", False)
+        
+        # Show/hide Wine encoder button based on whether Wine was skipped
+        if wine_skipped and not self.settings.probe_wine_encoders:
+            self.btn_check_wine.show()
+        else:
+            self.btn_check_wine.hide()
+        
         if res.get("ok"):
             # Build compact encoder status
             encoders = []
@@ -1695,16 +1759,27 @@ class MainWindow(QtWidgets.QMainWindow):
             if res.get("fdkaac"):
                 encoders.append(f"fdkaac {res.get('fdkaac')}")
             
-            txt = f"ffmpeg {res.get('ffmpeg', 'unknown')} | Available: {', '.join(encoders)}"
+            status_parts = [f"ffmpeg {res.get('ffmpeg', 'unknown')}"]
+            if encoders:
+                status_parts.append(f"Available: {', '.join(encoders)}")
+            if wine_skipped:
+                status_parts.append("(Wine skipped)")
+            
+            txt = " | ".join(status_parts)
             self.lbl_preflight.setText(txt)
             self.lbl_encoder_icon.setText("✅")
             logger.info("Preflight OK - encoders available")
+            
+            # Update AAC encoder dropdown
+            self._update_aac_encoder_combo(res)
+            
             self._on_codec_change(self.combo_codec.currentText())
         else:
             self.lbl_preflight.setText("No suitable AAC or Opus encoder found")
             self.lbl_encoder_icon.setText("❌")
             logger.error("No suitable encoder available.")
             self.selected_encoder = None
+            self.aac_pref_row.hide()
             self._apply_encoder_ui()
 
     def _on_preflight_err(self, msg: str) -> None:
@@ -1713,6 +1788,45 @@ class MainWindow(QtWidgets.QMainWindow):
         logger.error(f"Preflight error: {msg}")
         self.selected_encoder = None
         self.preflight_results = None
+        self._apply_encoder_ui()
+
+    def _update_aac_encoder_combo(self, res: dict) -> None:
+        """Update AAC encoder dropdown based on available encoders."""
+        available_aac = []
+        if res.get("libfdk_aac"):
+            available_aac.append("libfdk_aac")
+        if res.get("qaac"):
+            available_aac.append("qaac")
+        if res.get("fdkaac"):
+            available_aac.append("fdkaac")
+        
+        # Only show dropdown if multiple AAC encoders available
+        if len(available_aac) > 1:
+            self.combo_aac_encoder.blockSignals(True)
+            self.combo_aac_encoder.clear()
+            self.combo_aac_encoder.addItems(available_aac)
+            
+            # Restore saved preference if valid
+            pref = self.settings.aac_encoder_preference
+            if pref and pref in available_aac:
+                self.combo_aac_encoder.setCurrentText(pref)
+            
+            self.combo_aac_encoder.blockSignals(False)
+            self.aac_pref_row.show()
+        else:
+            self.aac_pref_row.hide()
+
+    def _on_aac_encoder_changed(self, encoder: str) -> None:
+        """Handle AAC encoder preference change."""
+        if not encoder:
+            return
+        logger.info(f"AAC encoder preference changed to: {encoder}")
+        self.settings.aac_encoder_preference = encoder
+        try:
+            self.settings.write()
+            logger.info("Saved encoder preference to config")
+        except Exception as e:
+            logger.warning(f"Failed to save encoder preference: {e}")
         self._apply_encoder_ui()
 
     def _on_codec_change(self, codec: str) -> None:
@@ -1742,16 +1856,37 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_encoder = "libopus"
                 self.lbl_quality_hint.setText("Using Opus VBR bitrate (kbps)")
         else:  # aac
-            if res.get("libfdk_aac"):
-                selected_encoder = "libfdk_aac"
+            # Check for user preference first
+            pref = self.settings.aac_encoder_preference
+            if pref and res.get(pref.replace("libfdk_aac", "libfdk_aac")):
+                # Validate preference is actually available
+                pref_available = (
+                    (pref == "libfdk_aac" and res.get("libfdk_aac")) or
+                    (pref == "qaac" and res.get("qaac")) or
+                    (pref == "fdkaac" and res.get("fdkaac"))
+                )
+                if pref_available:
+                    selected_encoder = pref
+                else:
+                    logger.warning(f"Preferred encoder '{pref}' not available, falling back")
+            
+            # Fall back to default order if no preference or preference unavailable
+            if not selected_encoder:
+                if res.get("libfdk_aac"):
+                    selected_encoder = "libfdk_aac"
+                elif res.get("qaac"):
+                    selected_encoder = "qaac"
+                elif res.get("fdkaac"):
+                    selected_encoder = "fdkaac"
+            
+            # Set quality controls based on selected encoder
+            if selected_encoder == "libfdk_aac":
                 self.spin_vbr.setEnabled(True)
                 self.lbl_quality_hint.setText("Using VBR for libfdk_aac (1-5)")
-            elif res.get("qaac"):
-                selected_encoder = "qaac"
+            elif selected_encoder == "qaac":
                 self.spin_tvbr.setEnabled(True)
                 self.lbl_quality_hint.setText("Using TVBR for qaac (0-127)")
-            elif res.get("fdkaac"):
-                selected_encoder = "fdkaac"
+            elif selected_encoder == "fdkaac":
                 self.spin_vbr.setEnabled(True)
                 self.lbl_quality_hint.setText("Using VBR for fdkaac (1-5)")
 
