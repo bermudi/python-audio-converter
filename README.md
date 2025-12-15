@@ -4,7 +4,7 @@ Mirror a FLAC library to an AAC (M4A) or Opus library with 1:1 directory structu
 
 This tool is **stateless**. It does not use a database. Instead, it embeds `PAC_*` tags into the output files to track their relationship to the source files. This allows for resumable and incremental runs without a persistent local database.
 
-- Docs: see [docs/SRS.md](docs/SRS.md) and [docs/Design.md](docs/Design.md)
+- Specs: see [openspec/specs/](openspec/specs/) for requirements and design
 - Package: `src/pac/`
 - Entry point: [main.py](main.py)
 
@@ -141,10 +141,36 @@ Exit codes:
   - [encoder.py](src/pac/encoder.py) — command builders and pipelines
   - [metadata.py](src/pac/metadata.py) — tag/art copy helpers
   - [scheduler.py](src/pac/scheduler.py) — bounded worker pool
-- `docs/`
-  - [SRS.md](docs/SRS.md) — requirements
-  - [Design.md](docs/Design.md) — architecture and rationale
+- `openspec/` — specifications and design docs
+  - `specs/audio-conversion/` — core conversion requirements
+  - `specs/library-management/` — FLAC library maintenance
 - `app/` — GUI application (PySide6)
 - `tests/` — unit/integration tests
-GUI application (PySide6)
-- `tests/` — unit/integration tests
+
+## Troubleshooting
+
+### FFmpeg Not Found
+```bash
+# Verify FFmpeg is installed
+ffmpeg -version
+
+# Install on Ubuntu/Debian
+sudo apt update && sudo apt install ffmpeg
+```
+
+### libfdk_aac Not Available
+PAC will automatically fall back to qaac or fdkaac. To check available encoders:
+```bash
+uv run python main.py preflight
+```
+
+### uv Sync Fails
+```bash
+# Clean and resync
+rm -rf .venv uv.lock && uv sync
+```
+
+### No Files Found During Scan
+- Use absolute paths for `--in` and `--out`
+- Ensure source directory contains `.flac` files
+- Try `--dry-run` first to see what would be processed
