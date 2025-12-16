@@ -10,14 +10,6 @@ from urllib.parse import unquote
 from PySide6 import QtCore, QtGui, QtWidgets
 from loguru import logger
 
-# Ensure local src/ is importable when running from project root
-ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 # Import project modules after adjusting sys.path
 from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
 from pac.config import PacSettings  # noqa: E402
