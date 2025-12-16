@@ -733,6 +733,7 @@ class SideBySideSourceModel(QtCore.QAbstractTableModel):
         self._files: List[CorrelatedFile] = []
         self._filtered_files: List[CorrelatedFile] = []
         self._filter_sync_status: Optional[SyncStatus] = None
+        self._filter_needs_conversion: bool = False
         # Bidirectional lookup: source_path -> row index
         self._source_to_row: dict[str, int] = {}
         # Counterpart lookup: source row -> mirror row (when both exist)
@@ -745,9 +746,14 @@ class SideBySideSourceModel(QtCore.QAbstractTableModel):
         self._build_lookup_maps()
         self.endResetModel()
     
-    def set_filter(self, sync_status: Optional[SyncStatus] = None) -> None:
+    def set_filter(
+        self,
+        sync_status: Optional[SyncStatus] = None,
+        needs_conversion: bool = False,
+    ) -> None:
         self.beginResetModel()
         self._filter_sync_status = sync_status
+        self._filter_needs_conversion = needs_conversion
         self._apply_filters()
         self._build_lookup_maps()
         self.endResetModel()
@@ -762,6 +768,8 @@ class SideBySideSourceModel(QtCore.QAbstractTableModel):
             if f.source is None:
                 continue
             if self._filter_sync_status and f.sync_status != self._filter_sync_status:
+                continue
+            if self._filter_needs_conversion and f.sync_status not in (SyncStatus.MISSING, SyncStatus.OUTDATED):
                 continue
             self._filtered_files.append(f)
     
@@ -846,6 +854,7 @@ class SideBySideMirrorModel(QtCore.QAbstractTableModel):
         self._files: List[CorrelatedFile] = []
         self._filtered_files: List[CorrelatedFile] = []
         self._filter_sync_status: Optional[SyncStatus] = None
+        self._filter_needs_conversion: bool = False
         # Bidirectional lookup: output_path -> row index
         self._output_to_row: dict[str, int] = {}
         # Counterpart lookup: output row -> source row
@@ -858,9 +867,14 @@ class SideBySideMirrorModel(QtCore.QAbstractTableModel):
         self._build_lookup_maps()
         self.endResetModel()
     
-    def set_filter(self, sync_status: Optional[SyncStatus] = None) -> None:
+    def set_filter(
+        self,
+        sync_status: Optional[SyncStatus] = None,
+        needs_conversion: bool = False,
+    ) -> None:
         self.beginResetModel()
         self._filter_sync_status = sync_status
+        self._filter_needs_conversion = needs_conversion
         self._apply_filters()
         self._build_lookup_maps()
         self.endResetModel()
@@ -872,6 +886,8 @@ class SideBySideMirrorModel(QtCore.QAbstractTableModel):
         self._filtered_files = []
         for f in self._files:
             if self._filter_sync_status and f.sync_status != self._filter_sync_status:
+                continue
+            if self._filter_needs_conversion and f.sync_status not in (SyncStatus.MISSING, SyncStatus.OUTDATED):
                 continue
             self._filtered_files.append(f)
     
@@ -2331,10 +2347,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.sbs_source_model.set_filter(sync_status=SyncStatus.ORPHAN)
                 self.sbs_mirror_model.set_filter(sync_status=SyncStatus.ORPHAN)
             elif filter_text == "Needs Conversion":
-                # Missing or outdated
-                self.sbs_source_model.clear_filters()
-                self.sbs_mirror_model.clear_filters()
-                # Note: Would need custom filter for this, for now show all
+                self.sbs_source_model.set_filter(needs_conversion=True)
+                self.sbs_mirror_model.set_filter(needs_conversion=True)
         elif view_mode == "With Outputs":
             # Correlated view filters
             if filter_text == "All Files":
