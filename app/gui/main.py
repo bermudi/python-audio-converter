@@ -723,6 +723,233 @@ class CorrelatedTableModel(QtCore.QAbstractTableModel):
         return [self._filtered_files[r] for r in rows if 0 <= r < len(self._filtered_files)]
 
 
+class SideBySideSourceModel(QtCore.QAbstractTableModel):
+    """Table model for side-by-side view: source (left) panel."""
+    
+    COLUMNS = ["Path", "Status", "Format", "Size"]
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._files: List[CorrelatedFile] = []
+        self._filtered_files: List[CorrelatedFile] = []
+        self._filter_sync_status: Optional[SyncStatus] = None
+        # Bidirectional lookup: source_path -> row index
+        self._source_to_row: dict[str, int] = {}
+        # Counterpart lookup: source row -> mirror row (when both exist)
+        self._source_to_mirror_row: dict[int, int] = {}
+    
+    def set_files(self, files: List[CorrelatedFile]) -> None:
+        self.beginResetModel()
+        self._files = files
+        self._apply_filters()
+        self._build_lookup_maps()
+        self.endResetModel()
+    
+    def set_filter(self, sync_status: Optional[SyncStatus] = None) -> None:
+        self.beginResetModel()
+        self._filter_sync_status = sync_status
+        self._apply_filters()
+        self._build_lookup_maps()
+        self.endResetModel()
+    
+    def clear_filters(self) -> None:
+        self.set_filter()
+    
+    def _apply_filters(self) -> None:
+        self._filtered_files = []
+        for f in self._files:
+            # Only include files that have a source
+            if f.source is None:
+                continue
+            if self._filter_sync_status and f.sync_status != self._filter_sync_status:
+                continue
+            self._filtered_files.append(f)
+    
+    def _build_lookup_maps(self) -> None:
+        self._source_to_row.clear()
+        self._source_to_mirror_row.clear()
+        for row, cf in enumerate(self._filtered_files):
+            if cf.source:
+                self._source_to_row[str(cf.source.rel_path)] = row
+    
+    def get_row_for_source_path(self, source_path: str) -> Optional[int]:
+        return self._source_to_row.get(source_path)
+    
+    def rowCount(self, parent=None) -> int:
+        return len(self._filtered_files)
+    
+    def columnCount(self, parent=None) -> int:
+        return len(self.COLUMNS)
+    
+    def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
+        if role == QtCore.Qt.DisplayRole and orientation == QtCore.Qt.Horizontal:
+            return self.COLUMNS[section]
+        return None
+    
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._filtered_files):
+            return None
+        
+        cf = self._filtered_files[index.row()]
+        col = index.column()
+        
+        if role == QtCore.Qt.DisplayRole:
+            if col == 0:  # Path
+                return str(cf.source.rel_path) if cf.source else "—"
+            elif col == 1:  # Status (sync)
+                return cf.sync_status.value.title()
+            elif col == 2:  # Format
+                if cf.source and cf.source.bit_depth and cf.source.sample_rate:
+                    return f"{cf.source.bit_depth}bit/{cf.source.sample_rate//1000}kHz"
+                return "-"
+            elif col == 3:  # Size
+                if cf.source:
+                    return f"{cf.source.size / 1024 / 1024:.1f} MB"
+                return "-"
+        
+        elif role == QtCore.Qt.ForegroundRole:
+            if cf.sync_status == SyncStatus.SYNCED:
+                return QtGui.QColor("#2e7d32")  # Green
+            elif cf.sync_status == SyncStatus.OUTDATED:
+                return QtGui.QColor("#f9a825")  # Yellow/amber
+            elif cf.sync_status == SyncStatus.MISSING:
+                return QtGui.QColor("#c62828")  # Red
+            elif cf.sync_status == SyncStatus.ORPHAN:
+                return QtGui.QColor("#7b1fa2")  # Purple
+        
+        elif role == QtCore.Qt.BackgroundRole:
+            if cf.sync_status == SyncStatus.SYNCED:
+                return QtGui.QColor("#e8f5e9")  # Light green
+            elif cf.sync_status == SyncStatus.MISSING:
+                return QtGui.QColor("#ffebee")  # Light red
+            elif cf.sync_status == SyncStatus.OUTDATED:
+                return QtGui.QColor("#fff8e1")  # Light yellow
+        
+        elif role == QtCore.Qt.UserRole:
+            return cf
+        
+        return None
+    
+    def get_file_at(self, row: int) -> Optional[CorrelatedFile]:
+        if 0 <= row < len(self._filtered_files):
+            return self._filtered_files[row]
+        return None
+
+
+class SideBySideMirrorModel(QtCore.QAbstractTableModel):
+    """Table model for side-by-side view: mirror (right) panel."""
+    
+    COLUMNS = ["Path", "Status", "Codec", "Size"]
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._files: List[CorrelatedFile] = []
+        self._filtered_files: List[CorrelatedFile] = []
+        self._filter_sync_status: Optional[SyncStatus] = None
+        # Bidirectional lookup: output_path -> row index
+        self._output_to_row: dict[str, int] = {}
+        # Counterpart lookup: output row -> source row
+        self._output_to_source_row: dict[int, int] = {}
+    
+    def set_files(self, files: List[CorrelatedFile]) -> None:
+        self.beginResetModel()
+        self._files = files
+        self._apply_filters()
+        self._build_lookup_maps()
+        self.endResetModel()
+    
+    def set_filter(self, sync_status: Optional[SyncStatus] = None) -> None:
+        self.beginResetModel()
+        self._filter_sync_status = sync_status
+        self._apply_filters()
+        self._build_lookup_maps()
+        self.endResetModel()
+    
+    def clear_filters(self) -> None:
+        self.set_filter()
+    
+    def _apply_filters(self) -> None:
+        self._filtered_files = []
+        for f in self._files:
+            if self._filter_sync_status and f.sync_status != self._filter_sync_status:
+                continue
+            self._filtered_files.append(f)
+    
+    def _build_lookup_maps(self) -> None:
+        self._output_to_row.clear()
+        self._output_to_source_row.clear()
+        for row, cf in enumerate(self._filtered_files):
+            if cf.output:
+                self._output_to_row[str(cf.output.rel_path)] = row
+    
+    def get_row_for_output_path(self, output_path: str) -> Optional[int]:
+        return self._output_to_row.get(output_path)
+    
+    def rowCount(self, parent=None) -> int:
+        return len(self._filtered_files)
+    
+    def columnCount(self, parent=None) -> int:
+        return len(self.COLUMNS)
+    
+    def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
+        if role == QtCore.Qt.DisplayRole and orientation == QtCore.Qt.Horizontal:
+            return self.COLUMNS[section]
+        return None
+    
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._filtered_files):
+            return None
+        
+        cf = self._filtered_files[index.row()]
+        col = index.column()
+        
+        if role == QtCore.Qt.DisplayRole:
+            if col == 0:  # Path
+                if cf.output:
+                    return str(cf.output.rel_path)
+                return "— (missing)" if cf.sync_status == SyncStatus.MISSING else "—"
+            elif col == 1:  # Status (sync)
+                return cf.sync_status.value.title()
+            elif col == 2:  # Codec
+                if cf.output and cf.output.codec:
+                    return cf.output.codec.upper()
+                return "-"
+            elif col == 3:  # Size
+                if cf.output:
+                    return f"{cf.output.size / 1024 / 1024:.1f} MB"
+                return "-"
+        
+        elif role == QtCore.Qt.ForegroundRole:
+            if cf.sync_status == SyncStatus.SYNCED:
+                return QtGui.QColor("#2e7d32")  # Green
+            elif cf.sync_status == SyncStatus.OUTDATED:
+                return QtGui.QColor("#f9a825")  # Yellow/amber
+            elif cf.sync_status == SyncStatus.MISSING:
+                return QtGui.QColor("#c62828")  # Red
+            elif cf.sync_status == SyncStatus.ORPHAN:
+                return QtGui.QColor("#7b1fa2")  # Purple
+        
+        elif role == QtCore.Qt.BackgroundRole:
+            if cf.sync_status == SyncStatus.SYNCED:
+                return QtGui.QColor("#e8f5e9")  # Light green
+            elif cf.sync_status == SyncStatus.MISSING:
+                return QtGui.QColor("#ffebee")  # Light red
+            elif cf.sync_status == SyncStatus.OUTDATED:
+                return QtGui.QColor("#fff8e1")  # Light yellow
+            elif cf.sync_status == SyncStatus.ORPHAN:
+                return QtGui.QColor("#f3e5f5")  # Light purple
+        
+        elif role == QtCore.Qt.UserRole:
+            return cf
+        
+        return None
+    
+    def get_file_at(self, row: int) -> Optional[CorrelatedFile]:
+        if 0 <= row < len(self._filtered_files):
+            return self._filtered_files[row]
+        return None
+
+
 class LibrarySettingsDialog(QtWidgets.QDialog):
     """Modal dialog for library settings."""
     
@@ -1258,8 +1485,8 @@ class MainWindow(QtWidgets.QMainWindow):
         filter_row = QtWidgets.QHBoxLayout()
         filter_row.addWidget(QtWidgets.QLabel("View:"))
         self.combo_view_mode = QtWidgets.QComboBox()
-        self.combo_view_mode.addItems(["Source Only", "With Outputs", "Outputs Only"])
-        self.combo_view_mode.setToolTip("Source Only: FLAC library\nWith Outputs: Correlated view\nOutputs Only: Mirror directory")
+        self.combo_view_mode.addItems(["Source Only", "With Outputs", "Side-by-Side", "Outputs Only"])
+        self.combo_view_mode.setToolTip("Source Only: FLAC library\nWith Outputs: Correlated view\nSide-by-Side: Dual panel comparison\nOutputs Only: Mirror directory")
         filter_row.addWidget(self.combo_view_mode)
         
         filter_row.addWidget(QtWidgets.QLabel("Filter:"))
@@ -1299,6 +1526,69 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_view_mode = "Source Only"
         
         browser_layout.addWidget(self.browser_table, 1)
+        
+        # === SIDE-BY-SIDE VIEW ===
+        self.side_by_side_widget = QtWidgets.QWidget()
+        self.side_by_side_widget.setVisible(False)
+        sbs_layout = QtWidgets.QVBoxLayout(self.side_by_side_widget)
+        sbs_layout.setContentsMargins(0, 0, 0, 0)
+        sbs_layout.setSpacing(4)
+        
+        # Side-by-side splitter with two panels
+        self.sbs_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        
+        # Left panel: Source Library
+        sbs_left_widget = QtWidgets.QWidget()
+        sbs_left_layout = QtWidgets.QVBoxLayout(sbs_left_widget)
+        sbs_left_layout.setContentsMargins(0, 0, 0, 0)
+        sbs_left_layout.setSpacing(2)
+        self.lbl_sbs_source = QtWidgets.QLabel("Source Library")
+        self.lbl_sbs_source.setStyleSheet("font-weight: bold; padding: 4px; background: #e3f2fd;")
+        sbs_left_layout.addWidget(self.lbl_sbs_source)
+        
+        self.sbs_source_table = QtWidgets.QTableView()
+        self.sbs_source_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.sbs_source_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.sbs_source_table.setSortingEnabled(True)
+        self.sbs_source_table.setAlternatingRowColors(True)
+        self.sbs_source_table.horizontalHeader().setStretchLastSection(True)
+        self.sbs_source_table.verticalHeader().setVisible(False)
+        sbs_left_layout.addWidget(self.sbs_source_table, 1)
+        self.sbs_splitter.addWidget(sbs_left_widget)
+        
+        # Right panel: Mirror Library
+        sbs_right_widget = QtWidgets.QWidget()
+        sbs_right_layout = QtWidgets.QVBoxLayout(sbs_right_widget)
+        sbs_right_layout.setContentsMargins(0, 0, 0, 0)
+        sbs_right_layout.setSpacing(2)
+        self.lbl_sbs_mirror = QtWidgets.QLabel("Mirror Library")
+        self.lbl_sbs_mirror.setStyleSheet("font-weight: bold; padding: 4px; background: #fff3e0;")
+        sbs_right_layout.addWidget(self.lbl_sbs_mirror)
+        
+        self.sbs_mirror_table = QtWidgets.QTableView()
+        self.sbs_mirror_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.sbs_mirror_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.sbs_mirror_table.setSortingEnabled(True)
+        self.sbs_mirror_table.setAlternatingRowColors(True)
+        self.sbs_mirror_table.horizontalHeader().setStretchLastSection(True)
+        self.sbs_mirror_table.verticalHeader().setVisible(False)
+        sbs_right_layout.addWidget(self.sbs_mirror_table, 1)
+        self.sbs_splitter.addWidget(sbs_right_widget)
+        
+        # Set equal splitter sizes
+        self.sbs_splitter.setSizes([400, 400])
+        sbs_layout.addWidget(self.sbs_splitter, 1)
+        
+        # Side-by-side models
+        self.sbs_source_model = SideBySideSourceModel(self)
+        self.sbs_mirror_model = SideBySideMirrorModel(self)
+        self.sbs_source_table.setModel(self.sbs_source_model)
+        self.sbs_mirror_table.setModel(self.sbs_mirror_model)
+        
+        # Selection sync flag to prevent infinite loops
+        self._sbs_sync_in_progress = False
+        
+        browser_layout.addWidget(self.side_by_side_widget, 1)
         
         # Selection info row
         selection_row = QtWidgets.QHBoxLayout()
@@ -1404,6 +1694,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_browser_clear_filter.clicked.connect(self._on_browser_clear_filter)
         self.browser_table.selectionModel().selectionChanged.connect(self._on_browser_selection_changed)
         self.browser_table.customContextMenuRequested.connect(self._on_browser_context_menu)
+        
+        # Side-by-side selection sync
+        self.sbs_source_table.selectionModel().selectionChanged.connect(self._on_sbs_source_selection_changed)
+        self.sbs_mirror_table.selectionModel().selectionChanged.connect(self._on_sbs_mirror_selection_changed)
+        # Linked scrolling
+        self.sbs_source_table.verticalScrollBar().valueChanged.connect(self._on_sbs_source_scroll)
+        self.sbs_mirror_table.verticalScrollBar().valueChanged.connect(self._on_sbs_mirror_scroll)
         
         # Stats buttons to filters
         self.btn_stat_total.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("All Files"))
@@ -1816,6 +2113,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Clear browser table and statistics."""
         self.browser_model.set_files([])
         self.correlated_model.set_files([])
+        self.sbs_source_model.set_files([])
+        self.sbs_mirror_model.set_files([])
         self._last_scanned_lib_path = ""
         
         # Reset statistics
@@ -1835,7 +2134,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_browser_filter.blockSignals(True)
         self.combo_browser_filter.clear()
         
-        if mode == "With Outputs":
+        if mode == "With Outputs" or mode == "Side-by-Side":
             self.combo_browser_filter.addItems([
                 "All Files", "Needs Conversion", "Synced", "Outdated", "Missing", "Orphaned Outputs",
             ])
@@ -1852,11 +2151,18 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.combo_browser_filter.blockSignals(False)
         
-        # Swap table model based on view mode
-        if mode == "With Outputs":
-            self.browser_proxy_model.setSourceModel(self.correlated_model)
+        # Toggle visibility between single table and side-by-side view
+        if mode == "Side-by-Side":
+            self.browser_table.setVisible(False)
+            self.side_by_side_widget.setVisible(True)
         else:
-            self.browser_proxy_model.setSourceModel(self.browser_model)
+            self.browser_table.setVisible(True)
+            self.side_by_side_widget.setVisible(False)
+            # Swap table model based on view mode
+            if mode == "With Outputs":
+                self.browser_proxy_model.setSourceModel(self.correlated_model)
+            else:
+                self.browser_proxy_model.setSourceModel(self.browser_model)
         
         # Trigger rescan if we have a valid path
         lib_root = self.edit_lib_root.text().strip()
@@ -1877,10 +2183,10 @@ class MainWindow(QtWidgets.QMainWindow):
         mirror_out = self.edit_mirror_out.text().strip()
         view_mode = self.combo_view_mode.currentText()
         
-        if view_mode == "With Outputs" and (not mirror_out or not Path(mirror_out).exists()):
+        if view_mode in ("With Outputs", "Side-by-Side") and (not mirror_out or not Path(mirror_out).exists()):
             QtWidgets.QMessageBox.warning(
                 self, "Missing Mirror Output",
-                "Correlated view requires a valid Mirror output directory"
+                f"{view_mode} view requires a valid Mirror output directory"
             )
             return
         
@@ -1892,7 +2198,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         
         # Map view mode to correlation mode
-        if view_mode == "With Outputs":
+        if view_mode in ("With Outputs", "Side-by-Side"):
             correlation_mode = BrowserWorker.MODE_WITH_OUTPUTS
         elif view_mode == "Outputs Only":
             correlation_mode = BrowserWorker.MODE_OUTPUTS_ONLY
@@ -1942,6 +2248,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # Update correlated table model
             self.correlated_model.set_files(analysis.files)
             
+            # Also update side-by-side models (shared data)
+            self.sbs_source_model.set_files(analysis.files)
+            self.sbs_mirror_model.set_files(analysis.files)
+            
             # Update statistics for correlated view
             self._update_correlated_statistics(analysis)
         else:
@@ -1954,8 +2264,12 @@ class MainWindow(QtWidgets.QMainWindow):
             # Update statistics
             self._update_browser_statistics(analysis)
         
-        # Resize columns to content
-        self.browser_table.resizeColumnsToContents()
+        # Resize columns to content based on current view
+        if self._current_view_mode == "Side-by-Side":
+            self.sbs_source_table.resizeColumnsToContents()
+            self.sbs_mirror_table.resizeColumnsToContents()
+        else:
+            self.browser_table.resizeColumnsToContents()
 
     def _update_browser_statistics(self, analysis: LibraryAnalysis) -> None:
         """Update the statistics bar with analysis results."""
@@ -1999,7 +2313,29 @@ class MainWindow(QtWidgets.QMainWindow):
         """Handle filter combobox change."""
         view_mode = self._current_view_mode
         
-        if view_mode == "With Outputs":
+        if view_mode == "Side-by-Side":
+            # Side-by-side view filters - apply to both panels
+            if filter_text == "All Files":
+                self.sbs_source_model.clear_filters()
+                self.sbs_mirror_model.clear_filters()
+            elif filter_text == "Synced":
+                self.sbs_source_model.set_filter(sync_status=SyncStatus.SYNCED)
+                self.sbs_mirror_model.set_filter(sync_status=SyncStatus.SYNCED)
+            elif filter_text == "Outdated":
+                self.sbs_source_model.set_filter(sync_status=SyncStatus.OUTDATED)
+                self.sbs_mirror_model.set_filter(sync_status=SyncStatus.OUTDATED)
+            elif filter_text == "Missing":
+                self.sbs_source_model.set_filter(sync_status=SyncStatus.MISSING)
+                self.sbs_mirror_model.set_filter(sync_status=SyncStatus.MISSING)
+            elif filter_text == "Orphaned Outputs":
+                self.sbs_source_model.set_filter(sync_status=SyncStatus.ORPHAN)
+                self.sbs_mirror_model.set_filter(sync_status=SyncStatus.ORPHAN)
+            elif filter_text == "Needs Conversion":
+                # Missing or outdated
+                self.sbs_source_model.clear_filters()
+                self.sbs_mirror_model.clear_filters()
+                # Note: Would need custom filter for this, for now show all
+        elif view_mode == "With Outputs":
             # Correlated view filters
             if filter_text == "All Files":
                 self.correlated_model.clear_filters()
@@ -2038,8 +2374,116 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_browser_filter.setCurrentText("All Files")
         if self._current_view_mode == "With Outputs":
             self.correlated_model.clear_filters()
+        elif self._current_view_mode == "Side-by-Side":
+            self.sbs_source_model.clear_filters()
+            self.sbs_mirror_model.clear_filters()
         else:
             self.browser_model.clear_filters()
+
+    # === SIDE-BY-SIDE SELECTION AND SCROLL SYNC ===
+    def _on_sbs_source_selection_changed(self) -> None:
+        """Handle selection change in source (left) panel - sync to mirror."""
+        if self._sbs_sync_in_progress:
+            return
+        
+        indexes = self.sbs_source_table.selectionModel().selectedRows()
+        if not indexes:
+            return
+        
+        self._sbs_sync_in_progress = True
+        try:
+            row = indexes[0].row()
+            cf = self.sbs_source_model.get_file_at(row)
+            if cf:
+                # Find corresponding row in mirror model
+                mirror_row = self._find_mirror_row_for_correlated(cf)
+                if mirror_row is not None:
+                    # Select and scroll to row in mirror table
+                    mirror_index = self.sbs_mirror_model.index(mirror_row, 0)
+                    self.sbs_mirror_table.selectionModel().select(
+                        mirror_index,
+                        QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows
+                    )
+                    self.sbs_mirror_table.scrollTo(mirror_index)
+                else:
+                    # No counterpart - clear mirror selection
+                    self.sbs_mirror_table.selectionModel().clearSelection()
+                
+                # Update selection label
+                self.lbl_browser_selection.setText(f"Selected: {cf.display_path}")
+        finally:
+            self._sbs_sync_in_progress = False
+    
+    def _on_sbs_mirror_selection_changed(self) -> None:
+        """Handle selection change in mirror (right) panel - sync to source."""
+        if self._sbs_sync_in_progress:
+            return
+        
+        indexes = self.sbs_mirror_table.selectionModel().selectedRows()
+        if not indexes:
+            return
+        
+        self._sbs_sync_in_progress = True
+        try:
+            row = indexes[0].row()
+            cf = self.sbs_mirror_model.get_file_at(row)
+            if cf:
+                # Find corresponding row in source model
+                source_row = self._find_source_row_for_correlated(cf)
+                if source_row is not None:
+                    # Select and scroll to row in source table
+                    source_index = self.sbs_source_model.index(source_row, 0)
+                    self.sbs_source_table.selectionModel().select(
+                        source_index,
+                        QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows
+                    )
+                    self.sbs_source_table.scrollTo(source_index)
+                else:
+                    # No counterpart (orphan) - clear source selection
+                    self.sbs_source_table.selectionModel().clearSelection()
+                
+                # Update selection label
+                self.lbl_browser_selection.setText(f"Selected: {cf.display_path}")
+        finally:
+            self._sbs_sync_in_progress = False
+    
+    def _find_mirror_row_for_correlated(self, cf: CorrelatedFile) -> Optional[int]:
+        """Find the row in mirror model that corresponds to this CorrelatedFile."""
+        # Both models share the same CorrelatedFile objects
+        for row in range(self.sbs_mirror_model.rowCount()):
+            mirror_cf = self.sbs_mirror_model.get_file_at(row)
+            if mirror_cf is cf:
+                return row
+        return None
+    
+    def _find_source_row_for_correlated(self, cf: CorrelatedFile) -> Optional[int]:
+        """Find the row in source model that corresponds to this CorrelatedFile."""
+        # Both models share the same CorrelatedFile objects
+        for row in range(self.sbs_source_model.rowCount()):
+            source_cf = self.sbs_source_model.get_file_at(row)
+            if source_cf is cf:
+                return row
+        return None
+    
+    def _on_sbs_source_scroll(self, value: int) -> None:
+        """Handle scroll in source panel - sync to mirror (linked scrolling)."""
+        if self._sbs_sync_in_progress:
+            return
+        self._sbs_sync_in_progress = True
+        try:
+            self.sbs_mirror_table.verticalScrollBar().setValue(value)
+        finally:
+            self._sbs_sync_in_progress = False
+    
+    def _on_sbs_mirror_scroll(self, value: int) -> None:
+        """Handle scroll in mirror panel - sync to source (linked scrolling)."""
+        if self._sbs_sync_in_progress:
+            return
+        self._sbs_sync_in_progress = True
+        try:
+            self.sbs_source_table.verticalScrollBar().setValue(value)
+        finally:
+            self._sbs_sync_in_progress = False
 
     def _on_browser_selection_changed(self) -> None:
         """Handle browser table selection changes."""
