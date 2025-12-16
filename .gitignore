@@ -13,3 +13,4 @@ in/
 out/
 test_dir/
 .envrc
+.bash_history
