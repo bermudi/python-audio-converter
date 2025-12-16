@@ -42,7 +42,13 @@ from pac.library_analyzer import (  # noqa: E402
     IntegrityStatus,
     SyncStatus,
 )
-from main import configure_logging, cmd_convert_dir, EXIT_OK, EXIT_WITH_FILE_ERRORS, EXIT_PREFLIGHT_FAILED  # noqa: E402
+from pac.logging_utils import configure_logging  # noqa: E402
+from pac.convert_dir import (  # noqa: E402
+    cmd_convert_dir,
+    EXIT_OK,
+    EXIT_WITH_FILE_ERRORS,
+    EXIT_PREFLIGHT_FAILED,
+)
 
 
 class DropLineEdit(QtWidgets.QLineEdit):

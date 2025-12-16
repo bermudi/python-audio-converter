@@ -4,10 +4,10 @@
 Maintain a FLAC library with integrity checks, compression policy enforcement, CD-quality resampling, and artwork extraction.
 ## Requirements
 ### Requirement: FLAC Library Management Command
-The system SHALL provide a `library` command that maintains a FLAC library with integrity checks, compression policy enforcement, and artwork extraction.
+The system SHALL provide a `library` command that maintains a FLAC library with integrity checks, compression policy enforcement, and artwork extraction. This CLI command SHALL be considered a debug/testing interface; the GUI Library tab SHALL be the primary user-facing interface.
 
 #### Scenario: Library command invocation
-- **WHEN** user runs `pac library --root ~/Music/FLAC`
+- **WHEN** a developer runs `pac library --root ~/Music/FLAC`
 - **THEN** the system SHALL scan, plan, and execute library maintenance actions
 
 ### Requirement: Integrity Verification
@@ -329,6 +329,10 @@ The GUI SHALL allow users to switch between different browser view modes.
 - **WHEN** user selects "Outputs Only" view mode
 - **THEN** the browser SHALL display only the output directory contents, highlighting orphans
 
+#### Scenario: Switch to side-by-side view
+- **WHEN** user selects "Side-by-Side" view mode
+- **THEN** the browser SHALL display two synchronized panels for source and mirror libraries
+
 ### Requirement: Sync Status Filtering
 The GUI SHALL allow filtering the correlated view by sync status.
 
@@ -395,4 +399,86 @@ The GUI path input fields SHALL accept drag-and-drop of directories from file ma
 #### Scenario: Wayland compatibility
 - **WHEN** user drags a folder from Dolphin (KDE) on Wayland
 - **THEN** the drop SHALL be accepted and path populated correctly
+
+### Requirement: Side-by-Side Browser View
+The GUI SHALL provide a side-by-side view mode displaying the source library and mirror library in two synchronized panels.
+
+#### Scenario: Enable side-by-side view
+- **WHEN** user selects "Side-by-Side" view mode and both library and mirror paths are set
+- **THEN** the browser SHALL display two panels: source library (left) and mirror library (right)
+
+#### Scenario: Side-by-side requires both paths
+- **WHEN** user selects "Side-by-Side" view mode without a mirror path set
+- **THEN** the system SHALL display an error prompting for the mirror path
+
+### Requirement: Side-by-Side Selection Synchronization
+The GUI SHALL synchronize selection between the two side-by-side panels, highlighting counterpart files when a selection is made.
+
+#### Scenario: Select source file shows mirror counterpart
+- **WHEN** user selects a source file in the left panel
+- **THEN** the right panel SHALL highlight and scroll to the corresponding output file (if it exists)
+
+#### Scenario: Select mirror file shows source counterpart
+- **WHEN** user selects an output file in the right panel
+- **THEN** the left panel SHALL highlight and scroll to the corresponding source file (if it exists)
+
+#### Scenario: No counterpart exists
+- **WHEN** user selects a file that has no counterpart (orphan or missing)
+- **THEN** the other panel SHALL clear its selection and show no highlight
+
+### Requirement: Side-by-Side Linked Scrolling
+The GUI SHALL synchronize vertical scrolling between the two side-by-side panels by default, keeping counterpart files aligned.
+
+#### Scenario: Scroll left panel syncs right panel
+- **WHEN** user scrolls the source panel (left)
+- **THEN** the mirror panel (right) SHALL scroll to keep corresponding files aligned
+
+#### Scenario: Scroll right panel syncs left panel
+- **WHEN** user scrolls the mirror panel (right)
+- **THEN** the source panel (left) SHALL scroll to keep corresponding files aligned
+
+### Requirement: Side-by-Side Sync Status Indicators
+The GUI SHALL display visual sync status indicators in both panels of the side-by-side view.
+
+#### Scenario: Synced file indicator
+- **WHEN** a source file has a matching output with valid PAC_SRC_MD5
+- **THEN** both panels SHALL show a green "Synced" indicator for that file pair
+
+#### Scenario: Missing output indicator
+- **WHEN** a source file has no corresponding output
+- **THEN** the source panel SHALL show a red "Missing" indicator and the mirror panel SHALL show an empty placeholder row
+
+#### Scenario: Orphan output indicator
+- **WHEN** an output file has no corresponding source
+- **THEN** the mirror panel SHALL show a yellow "Orphan" indicator and the source panel SHALL show an empty placeholder row
+
+### Requirement: Side-by-Side Filtering
+The GUI SHALL allow filtering the side-by-side view, applying filters to both panels simultaneously.
+
+#### Scenario: Filter to missing outputs
+- **WHEN** user selects "Missing" filter in side-by-side view
+- **THEN** both panels SHALL show only source files without corresponding outputs
+
+#### Scenario: Filter to orphaned outputs
+- **WHEN** user selects "Orphaned" filter in side-by-side view
+- **THEN** both panels SHALL show only output files without corresponding sources
+
+#### Scenario: Clear filter
+- **WHEN** user selects "All Files" filter
+- **THEN** both panels SHALL show all files
+
+### Requirement: Debug/Testing CLI Interface (Library Management)
+The system SHALL provide a CLI interface for debug/testing and advanced usage of library management features. The CLI SHALL NOT be the primary user-facing interface and SHALL NOT be highlighted in user-facing documentation.
+
+#### Scenario: Developer runs library maintenance from CLI
+- **WHEN** a developer runs the CLI to execute library maintenance
+- **THEN** the system SHALL perform the requested operations and report results via structured console output and exit codes
+
+#### Scenario: Documentation positions GUI as primary
+- **WHEN** project documentation describes how to manage a FLAC library with PAC
+- **THEN** the GUI Library tab SHALL be presented as the primary workflow and the CLI SHALL be presented as optional (debug/testing and advanced usage)
+
+#### Scenario: Packaged CLI entrypoint
+- **WHEN** PAC is installed as a Python package
+- **THEN** a `pac-cli` entrypoint SHALL be provided for CLI access
 

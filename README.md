@@ -6,7 +6,8 @@ This tool is **stateless**. It does not use a database. Instead, it embeds `PAC_
 
 - Specs: see [openspec/specs/](openspec/specs/) for requirements and design
 - Package: `src/pac/`
-- Entry point: [main.py](main.py)
+- GUI entry point: `pac-gui` ([app/gui/main.py](app/gui/main.py))
+- Debug/testing CLI entry point: `pac-cli` ([src/pac/cli.py](src/pac/cli.py))
 
 ## Features
 
@@ -46,46 +47,214 @@ Use uv for environments and dependencies (no raw pip).
 - Verify the interpreter is from the uv venv:
   - `uv run which python`
 - Run commands via uv:
-  - `uv run python main.py preflight`
+  - `uv run pac-cli preflight`
 
-## Quick Start
+## GUI Quick Start (Primary Experience)
 
-1) Preflight encoders:
-```
-uv run python main.py preflight
-```
-2) Batch convert a directory (dry-run first to see the plan):
-```
-uv run python main.py convert-dir --in "/music/FLAC" --out "/music/AAC" --dry-run
-```
-3) Run for real with parallel workers:
-```
-uv run python main.py convert-dir \
-  --in "/music/FLAC" \
-  --out "/music/AAC" \
-  --workers 8 \
-  --vbr 5 \
-  --tvbr 96 \
-  --pcm-codec pcm_s24le \
-  --hash \
-  -v
-```
-4) Prune orphaned files from the destination (use with care):
-```
-uv run python main.py convert-dir --in "/music/FLAC" --out "/music/AAC" --prune
-```
+1. Install dependencies with uv:
+   ```
+   uv sync
+   ```
+2. Launch the GUI (starts encoder preflight automatically):
+   ```
+   uv run pac-gui
+   ```
+3. (Optional) Pre-populate paths when launching:
+   ```
+   uv run pac-gui --flac-library "/music/FLAC" --mirror-library "/music/AAC"
+   ```
+4. Configure operations in the GUI (Library tab or Convert tab), dry-run if desired, then run.
+
+## Debug / Testing CLI Quick Start
+
+The CLI is available for automation, testing, and advanced troubleshooting. It is not the primary user workflow, but remains fully supported.
+
+1. Preflight encoders:
+   ```
+   uv run pac-cli preflight
+   ```
+2. Batch convert a directory (dry-run first to see the plan):
+   ```
+   uv run pac-cli convert-dir --in "/music/FLAC" --out "/music/AAC" --dry-run
+   ```
+3. Run for real with parallel workers:
+   ```
+   uv run pac-cli convert-dir \
+     --in "/music/FLAC" \
+     --out "/music/AAC" \
+     --workers 8 \
+     --vbr 5 \
+     --tvbr 96 \
+     --pcm-codec pcm_s24le \
+     --hash \
+     -v
+   ```
+4. Prune orphaned files from the destination (use with care):
+   ```
+   uv run pac-cli convert-dir --in "/music/FLAC" --out "/music/AAC" --prune
+   ```
 
 ## GUI
 
 An interactive GUI is also available.
 
+### Launch
+
+```bash
+uv run pac-gui
 ```
-uv run python app/gui/main.py
+
+Optional startup arguments (pre-populate fields):
+
+```bash
+uv run pac-gui \
+  --flac-library "/music/FLAC" \
+  --mirror-library "/music/AAC"
 ```
+
+### Library GUI (Library tab)
+
+The **Library** tab is for maintaining a FLAC library and (optionally) keeping a lossy mirror in sync. It has three main areas:
+
+- **Top bar**
+  - **Library:** FLAC library root (drag-and-drop a folder or browse).
+  - **Mirror:** Optional output directory used for mirror-related features.
+  - **Settings…** Library-specific settings (resample behavior, target compression, artwork extraction settings, worker counts).
+- **Operations panel (left)**
+  - Checkboxes for which operations to run.
+  - **Scope** (Entire Library vs Selection Only).
+  - **Dry Run** toggle.
+  - **Run** button (and **Pause/Cancel** during an active run).
+- **Browser panel (right)**
+  - A table view of files plus status columns.
+  - View mode and filter controls to focus on the files you care about.
+
+#### 1) Set paths (required)
+
+1. Set **Library** to the root folder that contains your `.flac` library.
+2. (Optional) Set **Mirror** to your destination library folder if you use:
+    - `Adopt Legacy`
+    - `Update Mirror`
+    - Correlated/side-by-side/output-only browsing modes
+
+Notes:
+
+- The path fields accept folder drag-and-drop.
+- Some features are disabled until a valid **Mirror** path is set.
+
+#### 2) Browse and filter the library
+
+The browser table shows one row per file and includes columns:
+
+- **Path**
+- **Status** (e.g. OK / Needs Action / Error)
+- **Integrity** (e.g. Untested / OK / Failed)
+- **Format** (bit-depth/sample-rate)
+- **Compression** (FLAC compression tag status)
+- **Art** (embedded/exported art status)
+- **Size**
+
+Use these controls above the table:
+
+- **View**
+  - **Source Only**: scan and show the FLAC library.
+  - **With Outputs**: correlate source files with mirror outputs (requires **Mirror**).
+  - **Side-by-Side**: two synchronized tables (source and mirror) to compare (requires **Mirror**).
+  - **Outputs Only**: analyze the mirror/output directory.
+- **Filter** (the list changes based on the selected view)
+  - In **Source Only** view:
+    - **All Files**
+    - **Needs Action**
+    - **Hi-Res Only**
+    - **Integrity Unknown**
+    - **Integrity Failed**
+    - **Needs Recompress**
+    - **Legacy (No PAC tags)**
+  - In **With Outputs** / **Side-by-Side** view:
+    - **All Files**
+    - **Needs Conversion**
+    - **Synced**
+    - **Outdated**
+    - **Missing**
+    - **Orphaned Outputs**
+  - In **Outputs Only** view:
+    - **All Files**
+    - **Legacy (No PAC tags)**
+    - **Orphaned Outputs**
+- **Clear** resets filtering.
+- **Rescan** re-runs the analysis to refresh statuses.
+
+ Notes:
+
+ - Changing **Library** path triggers an automatic scan once the path is valid (the field gets a green border when valid).
+ - **With Outputs**, **Side-by-Side**, and **Outputs Only** require a valid **Mirror** path and will show a warning if it’s missing.
+
+Quick filters are also available via the clickable stats buttons:
+
+- **Total**
+- **Hi-Res**
+- **Untested**
+- **Failed**
+- **Recompress**
+- **Legacy**
+
+#### 3) Choose scope (Entire Library vs Selection Only)
+
+In the Operations panel:
+
+- **Entire Library** runs the selected operations on everything under **Library**.
+- **Selection Only** runs only on rows you select in the browser table.
+  - Select multiple rows with Shift/Ctrl.
+  - If you choose Selection Only but nothing is selected, the GUI will block the run.
+
+#### 4) Run operations
+
+Select the operations you want in the left panel:
+
+- **Integrity Check**: tests FLAC files for corruption.
+- **Resample to CD**: resamples hi-res sources to 16-bit / 44.1kHz (behavior controlled by Settings).
+- **Recompress FLAC**: recompresses FLAC to the target compression level.
+- **Extract Artwork**: extracts embedded artwork based on your library settings.
+- **Adopt Legacy**: adds missing `PAC_*` tags to existing outputs (requires **Mirror**).
+- **Update Mirror**: updates the lossy mirror outputs (requires **Mirror**).
+
+Then:
+
+1. (Recommended) enable **Dry Run** first to see what would happen.
+2. Click **Run**.
+3. While running:
+   - **Pause** temporarily stops processing (click again to Resume).
+   - **Cancel** requests a stop.
+
+ Notes:
+
+- If you select **Adopt Legacy** *only*, it runs via a dedicated “adopt” phase.
+- If you select **Adopt Legacy** plus other operations, adoption is handled separately from the other phases.
+
+#### 5) Watch progress, issues, and logs
+
+- The app has a shared **log panel** at the bottom.
+  - Use the **Log** toggle ("▶ Log" / "▼ Log") to collapse/expand it.
+  - In the Library tab you can also expand **Details**:
+    - Status counters (scanned, integrity OK/failed, resampled, recompressed, art exported, adopted, held)
+    - A compact **Issues** list for notable problems
+
+Tip:
+
+- The browser panel also has selection actions (**Run Integrity** and **Adopt Selected**) that become enabled when you select one or more rows.
+
+### Safety notes (read before running destructive actions)
+
+- **Dry Run** is strongly recommended before running anything on a large library.
+- **Adopt Legacy** and **Update Mirror** act on your mirror/output library; confirm the **Mirror** path is correct.
+- This project also has a separate **Convert** tab for full directory mirroring and includes options like:
+  - `Prune orphans (deletes files)`
+  - `Force re-encode all`
+  If you enable those, read the confirmation dialogs carefully.
 
 ## CLI Reference
 
-Commands are implemented in [main.py](main.py).
+Commands are implemented in [`src/pac/cli.py`](src/pac/cli.py).
 
 - `preflight`
   - Checks for FFmpeg, libfdk_aac, and optional `qaac`/`fdkaac`
@@ -132,7 +301,7 @@ Exit codes:
 
 ## Project Structure
 
-- [main.py](main.py) — CLI entry point
+- [`src/pac/cli.py`](src/pac/cli.py) — CLI entry point (exposed via `pac-cli`)
 - `src/pac/`
   - [ffmpeg_check.py](src/pac/ffmpeg_check.py) — tool detection and versions
   - [scanner.py](src/pac/scanner.py) — source file discovery

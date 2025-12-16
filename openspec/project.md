@@ -1,7 +1,7 @@
 # Project Context
 
 ## Purpose
-Python Audio Converter (PAC) mirrors FLAC libraries to AAC (M4A) or Opus with 1:1 directory structure and metadata parity. Designed for Linux power users automating batch conversions. Also provides FLAC library maintenance (integrity checks, recompression, artwork extraction).
+Python Audio Converter (PAC) mirrors FLAC libraries to AAC (M4A) or Opus with 1:1 directory structure and metadata parity. PAC is GUI-first and targets desktop users managing FLAC libraries through an interactive PySide6 app. The CLI remains available for debug/testing and advanced automation, but is not highlighted as the primary workflow. PAC also provides FLAC library maintenance (integrity checks, recompression, artwork extraction).
 
 ## Tech Stack
 - **Language**: Python 3.12+
@@ -37,6 +37,7 @@ Python Audio Converter (PAC) mirrors FLAC libraries to AAC (M4A) or Opus with 1:
 - Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`
 
 ## Domain Context
+- **Desktop-first UX**: GUI is the default entrypoint (`pac-gui`). CLI (`pac-cli`) is documented as debug/testing only.
 - **FLAC STREAMINFO MD5**: Content hash embedded in FLAC files, used for change detection
 - **PAC_* tags**: Custom metadata fields (PAC_SRC_MD5, PAC_ENCODER, PAC_QUALITY, PAC_VERSION, PAC_SOURCE_REL) embedded in outputs
 - **Encoder priority**: libfdk_aac > qaac > fdkaac

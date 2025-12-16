@@ -11,12 +11,6 @@ from typing import Any, Optional, Callable
 
 from loguru import logger
 
-# Ensure local src/ is importable when running from project root
-ROOT = Path(__file__).parent
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
 # Prefer line-buffered output so progress prints appear promptly under wrappers
 try:  # Python 3.7+
     sys.stdout.reconfigure(line_buffering=True)
@@ -24,14 +18,15 @@ try:  # Python 3.7+
 except Exception:
     pass
 
-from pac.ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
-from pac.encoder import (  # noqa: E402
+from .logging_utils import configure_logging
+from .ffmpeg_check import probe_ffmpeg, probe_fdkaac, probe_qaac  # noqa: E402
+from .encoder import (  # noqa: E402
     encode_with_ffmpeg_libfdk,
     run_ffmpeg_pipe_to_qaac,
     run_ffmpeg_pipe_to_fdkaac,
     encode_with_ffmpeg_libopus,
 )
-from pac.metadata import (  # noqa: E402
+from .metadata import (  # noqa: E402
     copy_tags_flac_to_mp4,
     verify_tags_flac_vs_mp4,
     copy_tags_flac_to_opus,
@@ -39,19 +34,20 @@ from pac.metadata import (  # noqa: E402
     write_pac_tags_mp4,
     write_pac_tags_opus,
 )
-from pac.scanner import scan_flac_files  # noqa: E402
-from pac.scheduler import WorkerPool  # noqa: E402
-from pac.planner import plan_changes  # noqa: E402
-from pac.config import PacSettings, cli_overrides_from_args  # noqa: E402
-from pac.paths import resolve_collisions, sanitize_rel_path  # noqa: E402
-from pac.dest_index import build_dest_index  # noqa: E402
-from pac.db import PacDB # noqa: E402
-from pac.library_runner import cmd_manage_library  # noqa: E402
+from .scanner import scan_flac_files  # noqa: E402
+from .scheduler import WorkerPool  # noqa: E402
+from .planner import plan_changes  # noqa: E402
+from .config import PacSettings, cli_overrides_from_args  # noqa: E402
+from .paths import resolve_collisions, sanitize_rel_path  # noqa: E402
+from .dest_index import build_dest_index  # noqa: E402
+from .db import PacDB  # noqa: E402
+from .library_runner import cmd_manage_library  # noqa: E402
 
 
 EXIT_OK = 0
 EXIT_WITH_FILE_ERRORS = 2
 EXIT_PREFLIGHT_FAILED = 3
+
 
 def _empty_summary() -> dict[str, Any]:
     return {
@@ -65,20 +61,6 @@ def _empty_summary() -> dict[str, Any]:
         "converted": 0,
         "failed": 0,
     }
-
-
-def configure_logging(log_level: str = "INFO", log_json_path: Optional[str] = None) -> None:
-    """Configure Loguru for human console output and optional JSON lines file.
-
-    log_level: Console log level (e.g., INFO, DEBUG, WARNING).
-    log_json_path: If provided, write structured JSON lines to this path.
-    """
-    logger.remove()
-    # Human console sink
-    logger.add(sys.stderr, level=log_level.upper(), enqueue=True, backtrace=False, diagnose=False)
-    # Optional JSON lines sink
-    if log_json_path:
-        logger.add(log_json_path, level="DEBUG", serialize=True, enqueue=True)
 
 
 def cmd_preflight() -> int:

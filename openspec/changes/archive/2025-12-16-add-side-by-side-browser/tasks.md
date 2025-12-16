@@ -25,6 +25,6 @@
 - [x] 5.2 Apply filter to both panels simultaneously
 
 ## 6. Testing
-- [ ] 6.1 Manual test: verify selection sync works bidirectionally
-- [ ] 6.2 Manual test: verify filters apply to both panels
-- [ ] 6.3 Manual test: verify splitter resize persists during session
+- [x] 6.1 Manual test: verify selection sync works bidirectionally
+- [x] 6.2 Manual test: verify filters apply to both panels
+- [x] 6.3 Manual test: verify splitter resize persists during session
