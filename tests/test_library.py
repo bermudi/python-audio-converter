@@ -36,8 +36,7 @@ def test_plan_library_actions_basic():
     with patch('pac.library_planner.flac_stream_info') as mock_info, \
          patch('pac.library_planner.needs_cd_downmix', return_value=False), \
          patch('pac.library_planner.get_flac_tag', return_value="flac 1.4.3; level=8"), \
-         patch('pac.library_planner.extract_art') as mock_extract, \
-         patch('pac.library_planner._resolve_art_pattern', return_value=Path("/art/file1.jpg")):
+         patch('pac.library_planner.check_art_extraction_needed') as mock_check_art:
 
         mock_info.return_value = {
             'sample_rate': 44100,
@@ -45,7 +44,7 @@ def test_plan_library_actions_basic():
             'channels': 2,
             'md5': 'test_md5'
         }
-        mock_extract.return_value = Path("/art/file1.jpg")
+        mock_check_art.return_value = (True, Path("/art/file1.jpg"))
 
         plan = plan_library_actions(mock_sources, cfg, mock_db, 1234567890)
 
