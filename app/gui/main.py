@@ -1339,7 +1339,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_dest.setText(self._init_output)
 
     def _setup_library_tab(self) -> None:
-        """Setup the library management tab with browser-first layout."""
+        """Setup the library management tab with action-oriented layout."""
         layout = QtWidgets.QVBoxLayout(self.library_tab)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
@@ -1360,7 +1360,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Mirror output
         top_bar.addWidget(QtWidgets.QLabel("Mirror:"))
         self.edit_mirror_out = DropLineEdit()
-        self.edit_mirror_out.setPlaceholderText("Optional output dir")
+        self.edit_mirror_out.setPlaceholderText("Lossy mirror directory")
         self.btn_mirror_out = QtWidgets.QPushButton("…")
         self.btn_mirror_out.setFixedWidth(30)
         top_bar.addWidget(self.edit_mirror_out, 1)
@@ -1371,156 +1371,158 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_lib_settings.setToolTip("Open library settings dialog")
         top_bar.addWidget(self.btn_lib_settings)
         
+        # Rescan button (moved to top bar for visibility)
+        self.btn_browser_scan = QtWidgets.QPushButton("Rescan")
+        self.btn_browser_scan.setToolTip("Rescan library")
+        top_bar.addWidget(self.btn_browser_scan)
+        
         layout.addLayout(top_bar)
 
-        # === MAIN AREA: Horizontal splitter (operations panel + browser) ===
-        self.lib_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        
-        # --- LEFT: Compact operations panel ---
-        ops_widget = QtWidgets.QWidget()
-        ops_widget.setMaximumWidth(220)
-        ops_widget.setMinimumWidth(160)
-        ops_layout = QtWidgets.QVBoxLayout(ops_widget)
-        ops_layout.setContentsMargins(0, 0, 0, 0)
-        ops_layout.setSpacing(4)
-        
-        # Operations header
-        ops_header = QtWidgets.QLabel("<b>Operations</b>")
-        ops_layout.addWidget(ops_header)
-        
-        # Dry run toggle
-        self.chk_lib_dry_run = QtWidgets.QCheckBox("Dry Run")
-        self.chk_lib_dry_run.setChecked(False)
-        self.chk_lib_dry_run.setToolTip("Plan only, no changes")
-        ops_layout.addWidget(self.chk_lib_dry_run)
-        
-        # Operation checkboxes (compact, no individual run buttons)
-        self.chk_op_integrity = QtWidgets.QCheckBox("Integrity Check")
-        self.chk_op_integrity.setChecked(True)
-        self.chk_op_integrity.setToolTip("Test FLAC files for corruption")
-        ops_layout.addWidget(self.chk_op_integrity)
-        
-        self.chk_op_resample = QtWidgets.QCheckBox("Resample to CD")
-        self.chk_op_resample.setChecked(self.settings.flac_resample_to_cd)
-        self.chk_op_resample.setToolTip("Resample hi-res to 16-bit/44.1kHz")
-        ops_layout.addWidget(self.chk_op_resample)
-        
-        self.chk_op_recompress = QtWidgets.QCheckBox("Recompress FLAC")
-        self.chk_op_recompress.setChecked(True)
-        self.chk_op_recompress.setToolTip("Recompress to target level")
-        ops_layout.addWidget(self.chk_op_recompress)
-        
-        self.chk_op_artwork = QtWidgets.QCheckBox("Extract Artwork")
-        self.chk_op_artwork.setChecked(True)
-        self.chk_op_artwork.setToolTip("Extract embedded artwork")
-        ops_layout.addWidget(self.chk_op_artwork)
-        
-        self.chk_op_adopt = QtWidgets.QCheckBox("Adopt Legacy")
-        self.chk_op_adopt.setChecked(False)
-        self.chk_op_adopt.setToolTip("Add PAC_* tags to outputs (requires Mirror)")
-        self.lbl_adoptable_count = QtWidgets.QLabel("")
-        adopt_row = QtWidgets.QHBoxLayout()
-        adopt_row.addWidget(self.chk_op_adopt)
-        adopt_row.addWidget(self.lbl_adoptable_count)
-        adopt_row.addStretch()
-        ops_layout.addLayout(adopt_row)
-        
-        self.chk_op_mirror = QtWidgets.QCheckBox("Update Mirror")
-        self.chk_op_mirror.setChecked(False)
-        self.chk_op_mirror.setToolTip("Update lossy mirror (requires Mirror)")
-        ops_layout.addWidget(self.chk_op_mirror)
-        
-        ops_layout.addSpacing(8)
-        
-        # Scope control
-        scope_label = QtWidgets.QLabel("<b>Scope</b>")
-        ops_layout.addWidget(scope_label)
-        
-        self.radio_scope_library = QtWidgets.QRadioButton("Entire Library")
-        self.radio_scope_library.setChecked(True)
-        self.radio_scope_selection = QtWidgets.QRadioButton("Selection Only")
-        self.radio_scope_selection.setToolTip("Run on selected files in browser")
-        ops_layout.addWidget(self.radio_scope_library)
-        ops_layout.addWidget(self.radio_scope_selection)
-        
-        ops_layout.addStretch()
-        
-        # Run button
-        self.btn_lib_run = QtWidgets.QPushButton("Run")
-        self.btn_lib_run.setToolTip("Run checked operations")
-        self.btn_lib_run.setMinimumHeight(32)
-        ops_layout.addWidget(self.btn_lib_run)
-        
-        # Pause/Cancel (hidden by default)
-        self.btn_lib_pause = QtWidgets.QPushButton("Pause")
-        self.btn_lib_pause.hide()
-        ops_layout.addWidget(self.btn_lib_pause)
-        self.btn_lib_cancel = QtWidgets.QPushButton("Cancel")
-        self.btn_lib_cancel.hide()
-        ops_layout.addWidget(self.btn_lib_cancel)
-        
-        self.lib_splitter.addWidget(ops_widget)
-        
-        # --- RIGHT: Browser panel (primary workspace) ---
-        browser_widget = QtWidgets.QWidget()
-        browser_layout = QtWidgets.QVBoxLayout(browser_widget)
-        browser_layout.setContentsMargins(0, 0, 0, 0)
-        browser_layout.setSpacing(4)
-        
-        # Statistics bar (compact, clickable to filter)
+        # === STATS BAR: Clickable counters ===
         stats_bar = QtWidgets.QHBoxLayout()
-        stats_bar.setSpacing(2)
+        stats_bar.setSpacing(4)
+        
         self.btn_stat_total = QtWidgets.QPushButton("Total: 0")
         self.btn_stat_total.setFlat(True)
         self.btn_stat_total.setToolTip("Show all files")
+        
+        self.btn_stat_synced = QtWidgets.QPushButton("Synced: 0")
+        self.btn_stat_synced.setFlat(True)
+        self.btn_stat_synced.setStyleSheet("color: #2e7d32;")
+        self.btn_stat_synced.setToolTip("Filter synced files")
+        
+        self.btn_stat_missing = QtWidgets.QPushButton("Missing: 0")
+        self.btn_stat_missing.setFlat(True)
+        self.btn_stat_missing.setStyleSheet("color: #c62828; font-weight: bold;")
+        self.btn_stat_missing.setToolTip("Filter missing files (need conversion)")
+        
+        self.btn_stat_outdated = QtWidgets.QPushButton("Outdated: 0")
+        self.btn_stat_outdated.setFlat(True)
+        self.btn_stat_outdated.setStyleSheet("color: #f9a825;")
+        self.btn_stat_outdated.setToolTip("Filter outdated files (need re-conversion)")
+        
+        self.btn_stat_orphan = QtWidgets.QPushButton("Orphan: 0")
+        self.btn_stat_orphan.setFlat(True)
+        self.btn_stat_orphan.setStyleSheet("color: #7b1fa2;")
+        self.btn_stat_orphan.setToolTip("Filter orphaned outputs (no source)")
+        
+        # Legacy stats (for source-only view)
         self.btn_stat_hires = QtWidgets.QPushButton("Hi-Res: 0")
         self.btn_stat_hires.setFlat(True)
         self.btn_stat_hires.setToolTip("Filter hi-res files")
+        self.btn_stat_hires.hide()
+        
         self.btn_stat_integrity_unknown = QtWidgets.QPushButton("Untested: 0")
         self.btn_stat_integrity_unknown.setFlat(True)
+        self.btn_stat_integrity_unknown.hide()
+        
         self.btn_stat_integrity_failed = QtWidgets.QPushButton("Failed: 0")
         self.btn_stat_integrity_failed.setFlat(True)
         self.btn_stat_integrity_failed.setStyleSheet("color: red;")
+        self.btn_stat_integrity_failed.hide()
+        
         self.btn_stat_needs_recompress = QtWidgets.QPushButton("Recompress: 0")
         self.btn_stat_needs_recompress.setFlat(True)
+        self.btn_stat_needs_recompress.hide()
+        
         self.btn_stat_legacy = QtWidgets.QPushButton("Legacy: 0")
         self.btn_stat_legacy.setFlat(True)
+        self.btn_stat_legacy.hide()
         
         stats_bar.addWidget(self.btn_stat_total)
+        stats_bar.addWidget(self.btn_stat_synced)
+        stats_bar.addWidget(self.btn_stat_missing)
+        stats_bar.addWidget(self.btn_stat_outdated)
+        stats_bar.addWidget(self.btn_stat_orphan)
         stats_bar.addWidget(self.btn_stat_hires)
         stats_bar.addWidget(self.btn_stat_integrity_unknown)
         stats_bar.addWidget(self.btn_stat_integrity_failed)
         stats_bar.addWidget(self.btn_stat_needs_recompress)
         stats_bar.addWidget(self.btn_stat_legacy)
         stats_bar.addStretch(1)
-        browser_layout.addLayout(stats_bar)
+        layout.addLayout(stats_bar)
+
+        # === ACTION TOOLBAR: Primary actions ===
+        action_bar = QtWidgets.QHBoxLayout()
+        action_bar.setSpacing(8)
         
-        # View mode + Filter + Scan row
+        # Primary action buttons
+        self.btn_convert_missing = QtWidgets.QPushButton("Convert Missing")
+        self.btn_convert_missing.setToolTip("Convert all missing files to lossy mirror")
+        self.btn_convert_missing.setEnabled(False)
+        self.btn_convert_missing.setMinimumHeight(32)
+        self.btn_convert_missing.setStyleSheet("QPushButton:enabled { background-color: #4CAF50; color: white; font-weight: bold; }")
+        
+        self.btn_sync_outdated = QtWidgets.QPushButton("Sync Outdated")
+        self.btn_sync_outdated.setToolTip("Re-convert all outdated files")
+        self.btn_sync_outdated.setEnabled(False)
+        self.btn_sync_outdated.setMinimumHeight(32)
+        
+        self.btn_check_integrity = QtWidgets.QPushButton("Check Integrity")
+        self.btn_check_integrity.setToolTip("Run FLAC integrity check on library")
+        self.btn_check_integrity.setMinimumHeight(32)
+        
+        # More actions dropdown
+        self.btn_more_actions = QtWidgets.QToolButton()
+        self.btn_more_actions.setText("More ▼")
+        self.btn_more_actions.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.btn_more_actions.setMinimumHeight(32)
+        
+        more_menu = QtWidgets.QMenu(self.btn_more_actions)
+        self.action_recompress = more_menu.addAction("Recompress FLAC")
+        self.action_recompress.setToolTip("Recompress FLAC files to target compression level")
+        self.action_extract_art = more_menu.addAction("Extract Artwork")
+        self.action_extract_art.setToolTip("Extract embedded artwork to external files")
+        self.action_resample = more_menu.addAction("Resample Hi-Res to CD")
+        self.action_resample.setToolTip("Resample hi-res files to 16-bit/44.1kHz")
+        more_menu.addSeparator()
+        self.action_adopt_legacy = more_menu.addAction("Adopt Legacy Files")
+        self.action_adopt_legacy.setToolTip("Add PAC_* tags to existing mirror files")
+        self.btn_more_actions.setMenu(more_menu)
+        
+        # Dry run checkbox (compact)
+        self.chk_lib_dry_run = QtWidgets.QCheckBox("Dry Run")
+        self.chk_lib_dry_run.setChecked(False)
+        self.chk_lib_dry_run.setToolTip("Preview changes without modifying files")
+        
+        action_bar.addWidget(self.btn_convert_missing)
+        action_bar.addWidget(self.btn_sync_outdated)
+        action_bar.addWidget(self.btn_check_integrity)
+        action_bar.addWidget(self.btn_more_actions)
+        action_bar.addStretch(1)
+        action_bar.addWidget(self.chk_lib_dry_run)
+        
+        # Pause/Cancel buttons (hidden by default)
+        self.btn_lib_pause = QtWidgets.QPushButton("Pause")
+        self.btn_lib_pause.hide()
+        self.btn_lib_cancel = QtWidgets.QPushButton("Cancel")
+        self.btn_lib_cancel.hide()
+        action_bar.addWidget(self.btn_lib_pause)
+        action_bar.addWidget(self.btn_lib_cancel)
+        
+        layout.addLayout(action_bar)
+
+        # === FILTER ROW ===
         filter_row = QtWidgets.QHBoxLayout()
         filter_row.addWidget(QtWidgets.QLabel("View:"))
         self.combo_view_mode = QtWidgets.QComboBox()
-        self.combo_view_mode.addItems(["Source Only", "With Outputs", "Side-by-Side", "Outputs Only"])
-        self.combo_view_mode.setToolTip("Source Only: FLAC library\nWith Outputs: Correlated view\nSide-by-Side: Dual panel comparison\nOutputs Only: Mirror directory")
+        self.combo_view_mode.addItems(["Side-by-Side", "With Outputs", "Source Only", "Outputs Only"])
+        self.combo_view_mode.setToolTip("Side-by-Side: Dual panel comparison\nWith Outputs: Correlated table\nSource Only: FLAC library\nOutputs Only: Mirror directory")
         filter_row.addWidget(self.combo_view_mode)
         
         filter_row.addWidget(QtWidgets.QLabel("Filter:"))
         self.combo_browser_filter = QtWidgets.QComboBox()
         self.combo_browser_filter.addItems([
-            "All Files", "Needs Action", "Hi-Res Only",
-            "Integrity Unknown", "Integrity Failed",
-            "Needs Recompress", "Legacy (No PAC tags)",
+            "All Files", "Needs Conversion", "Synced", "Outdated", "Missing", "Orphaned Outputs",
         ])
         filter_row.addWidget(self.combo_browser_filter)
         self.btn_browser_clear_filter = QtWidgets.QPushButton("Clear")
         self.btn_browser_clear_filter.setFixedWidth(50)
         filter_row.addWidget(self.btn_browser_clear_filter)
         filter_row.addStretch(1)
-        self.btn_browser_scan = QtWidgets.QPushButton("Rescan")
-        self.btn_browser_scan.setToolTip("Rescan library (non-destructive)")
-        filter_row.addWidget(self.btn_browser_scan)
-        browser_layout.addLayout(filter_row)
+        layout.addLayout(filter_row)
         
-        # Table view (primary workspace)
+        # === MAIN TABLE VIEW ===
         self.browser_table = QtWidgets.QTableView()
         self.browser_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.browser_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -1533,17 +1535,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.browser_model = LibraryTableModel(self)
         self.correlated_model = CorrelatedTableModel(self)
         self.browser_proxy_model = QtCore.QSortFilterProxyModel(self)
-        self.browser_proxy_model.setSourceModel(self.browser_model)
+        self.browser_proxy_model.setSourceModel(self.correlated_model)  # Default to correlated
         self.browser_table.setModel(self.browser_proxy_model)
         
-        # Track current view mode
-        self._current_view_mode = "Source Only"
+        # Track current view mode (default to Side-by-Side for correlated view)
+        self._current_view_mode = "Side-by-Side"
         
-        browser_layout.addWidget(self.browser_table, 1)
+        layout.addWidget(self.browser_table, 1)
         
         # === SIDE-BY-SIDE VIEW ===
         self.side_by_side_widget = QtWidgets.QWidget()
-        self.side_by_side_widget.setVisible(False)
+        self.side_by_side_widget.setVisible(True)  # Default visible
         sbs_layout = QtWidgets.QVBoxLayout(self.side_by_side_widget)
         sbs_layout.setContentsMargins(0, 0, 0, 0)
         sbs_layout.setSpacing(4)
@@ -1556,13 +1558,13 @@ class MainWindow(QtWidgets.QMainWindow):
         sbs_left_layout = QtWidgets.QVBoxLayout(sbs_left_widget)
         sbs_left_layout.setContentsMargins(0, 0, 0, 0)
         sbs_left_layout.setSpacing(2)
-        self.lbl_sbs_source = QtWidgets.QLabel("Source Library")
+        self.lbl_sbs_source = QtWidgets.QLabel("Source Library (FLAC)")
         self.lbl_sbs_source.setStyleSheet("font-weight: bold; padding: 4px; background: #e3f2fd;")
         sbs_left_layout.addWidget(self.lbl_sbs_source)
         
         self.sbs_source_table = QtWidgets.QTableView()
         self.sbs_source_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.sbs_source_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.sbs_source_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.sbs_source_table.setSortingEnabled(True)
         self.sbs_source_table.setAlternatingRowColors(True)
         self.sbs_source_table.horizontalHeader().setStretchLastSection(True)
@@ -1575,13 +1577,13 @@ class MainWindow(QtWidgets.QMainWindow):
         sbs_right_layout = QtWidgets.QVBoxLayout(sbs_right_widget)
         sbs_right_layout.setContentsMargins(0, 0, 0, 0)
         sbs_right_layout.setSpacing(2)
-        self.lbl_sbs_mirror = QtWidgets.QLabel("Mirror Library")
+        self.lbl_sbs_mirror = QtWidgets.QLabel("Mirror Library (Lossy)")
         self.lbl_sbs_mirror.setStyleSheet("font-weight: bold; padding: 4px; background: #fff3e0;")
         sbs_right_layout.addWidget(self.lbl_sbs_mirror)
         
         self.sbs_mirror_table = QtWidgets.QTableView()
         self.sbs_mirror_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.sbs_mirror_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.sbs_mirror_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.sbs_mirror_table.setSortingEnabled(True)
         self.sbs_mirror_table.setAlternatingRowColors(True)
         self.sbs_mirror_table.horizontalHeader().setStretchLastSection(True)
@@ -1602,29 +1604,73 @@ class MainWindow(QtWidgets.QMainWindow):
         # Selection sync flag to prevent infinite loops
         self._sbs_sync_in_progress = False
         
-        browser_layout.addWidget(self.side_by_side_widget, 1)
+        layout.addWidget(self.side_by_side_widget, 1)
         
-        # Selection info row
-        selection_row = QtWidgets.QHBoxLayout()
-        self.lbl_browser_selection = QtWidgets.QLabel("Selected: 0 files")
-        selection_row.addWidget(self.lbl_browser_selection)
-        selection_row.addStretch(1)
-        self.btn_browser_run_integrity = QtWidgets.QPushButton("Run Integrity")
+        # Hide single table by default (Side-by-Side is default)
+        self.browser_table.setVisible(False)
+        
+        # === SELECTION ACTION BAR ===
+        selection_bar = QtWidgets.QHBoxLayout()
+        self.lbl_browser_selection = QtWidgets.QLabel("Select files to convert or check")
+        selection_bar.addWidget(self.lbl_browser_selection)
+        selection_bar.addStretch(1)
+        
+        self.btn_convert_selected = QtWidgets.QPushButton("Convert Selected")
+        self.btn_convert_selected.setToolTip("Convert selected files to lossy mirror")
+        self.btn_convert_selected.setEnabled(False)
+        self.btn_convert_selected.hide()
+        
+        self.btn_browser_run_integrity = QtWidgets.QPushButton("Check Selected")
+        self.btn_browser_run_integrity.setToolTip("Run integrity check on selected files")
         self.btn_browser_run_integrity.setEnabled(False)
+        self.btn_browser_run_integrity.hide()
+        
         self.btn_browser_run_adopt = QtWidgets.QPushButton("Adopt Selected")
+        self.btn_browser_run_adopt.setToolTip("Add PAC_* tags to selected legacy files")
         self.btn_browser_run_adopt.setEnabled(False)
-        selection_row.addWidget(self.btn_browser_run_integrity)
-        selection_row.addWidget(self.btn_browser_run_adopt)
-        browser_layout.addLayout(selection_row)
+        self.btn_browser_run_adopt.hide()
         
-        self.lib_splitter.addWidget(browser_widget)
+        # Quick select buttons
+        self.btn_select_all_missing = QtWidgets.QPushButton("Select All Missing")
+        self.btn_select_all_missing.setToolTip("Select all files with missing status")
+        self.btn_select_all_missing.hide()
         
-        # Set splitter sizes (operations panel narrow, browser wide)
-        self.lib_splitter.setSizes([180, 600])
-        self.lib_splitter.setStretchFactor(0, 0)
-        self.lib_splitter.setStretchFactor(1, 1)
+        selection_bar.addWidget(self.btn_select_all_missing)
+        selection_bar.addWidget(self.btn_convert_selected)
+        selection_bar.addWidget(self.btn_browser_run_integrity)
+        selection_bar.addWidget(self.btn_browser_run_adopt)
+        layout.addLayout(selection_bar)
         
-        layout.addWidget(self.lib_splitter, 1)
+        # Hidden elements for backward compatibility
+        self.radio_scope_library = QtWidgets.QRadioButton("Entire Library")
+        self.radio_scope_library.setChecked(True)
+        self.radio_scope_library.hide()
+        self.radio_scope_selection = QtWidgets.QRadioButton("Selection Only")
+        self.radio_scope_selection.hide()
+        self.btn_lib_run = QtWidgets.QPushButton("Run")
+        self.btn_lib_run.hide()
+        self.lbl_adoptable_count = QtWidgets.QLabel("")
+        self.lbl_adoptable_count.hide()
+        
+        # Hidden checkboxes for backward compatibility with existing code
+        self.chk_op_integrity = QtWidgets.QCheckBox("Integrity Check")
+        self.chk_op_integrity.setChecked(True)
+        self.chk_op_integrity.hide()
+        self.chk_op_resample = QtWidgets.QCheckBox("Resample to CD")
+        self.chk_op_resample.setChecked(self.settings.flac_resample_to_cd)
+        self.chk_op_resample.hide()
+        self.chk_op_recompress = QtWidgets.QCheckBox("Recompress FLAC")
+        self.chk_op_recompress.setChecked(True)
+        self.chk_op_recompress.hide()
+        self.chk_op_artwork = QtWidgets.QCheckBox("Extract Artwork")
+        self.chk_op_artwork.setChecked(True)
+        self.chk_op_artwork.hide()
+        self.chk_op_adopt = QtWidgets.QCheckBox("Adopt Legacy")
+        self.chk_op_adopt.setChecked(False)
+        self.chk_op_adopt.hide()
+        self.chk_op_mirror = QtWidgets.QCheckBox("Update Mirror")
+        self.chk_op_mirror.setChecked(False)
+        self.chk_op_mirror.hide()
 
         # === COLLAPSIBLE DETAILS AREA ===
         self.details_toggle = QtWidgets.QPushButton("▶ Details")
@@ -1695,7 +1741,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_mirror_out.clicked.connect(lambda: self._pick_dir(self.edit_mirror_out))
         self.btn_lib_settings.clicked.connect(self._on_lib_settings)
         
-        # Operations
+        # Action toolbar - primary actions
+        self.btn_convert_missing.clicked.connect(self._on_convert_missing)
+        self.btn_sync_outdated.clicked.connect(self._on_sync_outdated)
+        self.btn_check_integrity.clicked.connect(self._on_check_integrity)
+        self.btn_convert_selected.clicked.connect(self._on_convert_selected)
+        self.btn_select_all_missing.clicked.connect(self._on_select_all_missing)
+        
+        # More actions menu
+        self.action_recompress.triggered.connect(self._on_action_recompress)
+        self.action_extract_art.triggered.connect(self._on_action_extract_art)
+        self.action_resample.triggered.connect(self._on_action_resample)
+        self.action_adopt_legacy.triggered.connect(self._on_action_adopt_legacy)
+        
+        # Legacy operations (backward compatibility)
         self.btn_lib_run.clicked.connect(self.on_lib_run)
         self.btn_lib_cancel.clicked.connect(self.on_lib_cancel)
         self.btn_lib_pause.clicked.connect(self.on_lib_pause_resume)
@@ -1716,8 +1775,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sbs_source_table.verticalScrollBar().valueChanged.connect(self._on_sbs_source_scroll)
         self.sbs_mirror_table.verticalScrollBar().valueChanged.connect(self._on_sbs_mirror_scroll)
         
-        # Stats buttons to filters
+        # Stats buttons to filters (new sync-status based)
         self.btn_stat_total.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("All Files"))
+        self.btn_stat_synced.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Synced"))
+        self.btn_stat_missing.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Missing"))
+        self.btn_stat_outdated.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Outdated"))
+        self.btn_stat_orphan.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Orphaned Outputs"))
+        # Legacy stats buttons
         self.btn_stat_hires.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Hi-Res Only"))
         self.btn_stat_integrity_unknown.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Integrity Unknown"))
         self.btn_stat_integrity_failed.clicked.connect(lambda: self.combo_browser_filter.setCurrentText("Integrity Failed"))
@@ -1752,6 +1816,192 @@ class MainWindow(QtWidgets.QMainWindow):
         indexes = self.browser_table.selectionModel().selectedRows()
         if len(indexes) > 0:
             self.radio_scope_selection.setChecked(True)
+    
+    # === ACTION BUTTON HANDLERS ===
+    def _on_convert_missing(self) -> None:
+        """Convert all files with missing status."""
+        if not hasattr(self, '_current_analysis') or self._current_analysis is None:
+            QtWidgets.QMessageBox.warning(self, "No Scan", "Please scan the library first.")
+            return
+        
+        mirror_out = self.edit_mirror_out.text().strip()
+        if not mirror_out or not Path(mirror_out).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Mirror Directory",
+                "Please set a valid mirror output directory."
+            )
+            return
+        
+        # Get missing files from current analysis
+        missing_paths = []
+        if isinstance(self._current_analysis, CorrelatedAnalysis):
+            for cf in self._current_analysis.files:
+                if cf.sync_status == SyncStatus.MISSING and cf.source:
+                    missing_paths.append(str(cf.source.rel_path))
+        
+        if not missing_paths:
+            QtWidgets.QMessageBox.information(self, "No Missing Files", "All files are already synced.")
+            return
+        
+        logger.info(f"Converting {len(missing_paths)} missing files")
+        self._start_lib_operation(
+            dry_run=self.chk_lib_dry_run.isChecked(),
+            phases={PHASE_MIRROR},
+            only_rel_paths=missing_paths,
+        )
+    
+    def _on_sync_outdated(self) -> None:
+        """Re-convert all files with outdated status."""
+        if not hasattr(self, '_current_analysis') or self._current_analysis is None:
+            QtWidgets.QMessageBox.warning(self, "No Scan", "Please scan the library first.")
+            return
+        
+        mirror_out = self.edit_mirror_out.text().strip()
+        if not mirror_out or not Path(mirror_out).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Mirror Directory",
+                "Please set a valid mirror output directory."
+            )
+            return
+        
+        # Get outdated files from current analysis
+        outdated_paths = []
+        if isinstance(self._current_analysis, CorrelatedAnalysis):
+            for cf in self._current_analysis.files:
+                if cf.sync_status == SyncStatus.OUTDATED and cf.source:
+                    outdated_paths.append(str(cf.source.rel_path))
+        
+        if not outdated_paths:
+            QtWidgets.QMessageBox.information(self, "No Outdated Files", "All files are up to date.")
+            return
+        
+        logger.info(f"Re-converting {len(outdated_paths)} outdated files")
+        self._start_lib_operation(
+            dry_run=self.chk_lib_dry_run.isChecked(),
+            phases={PHASE_MIRROR},
+            only_rel_paths=outdated_paths,
+        )
+    
+    def _on_check_integrity(self) -> None:
+        """Run integrity check on entire library."""
+        lib_root = self.edit_lib_root.text().strip()
+        if not lib_root or not Path(lib_root).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Library Root",
+                "Please select a valid FLAC library root directory."
+            )
+            return
+        
+        logger.info("Running integrity check on library")
+        self._start_lib_operation(
+            dry_run=self.chk_lib_dry_run.isChecked(),
+            phases={PHASE_INTEGRITY},
+        )
+    
+    def _on_convert_selected(self) -> None:
+        """Convert selected files to mirror."""
+        selected_paths = self._get_selected_source_paths()
+        if not selected_paths:
+            QtWidgets.QMessageBox.warning(self, "No Selection", "Please select files to convert.")
+            return
+        
+        mirror_out = self.edit_mirror_out.text().strip()
+        if not mirror_out or not Path(mirror_out).exists():
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Mirror Directory",
+                "Please set a valid mirror output directory."
+            )
+            return
+        
+        logger.info(f"Converting {len(selected_paths)} selected files")
+        self._start_lib_operation(
+            dry_run=self.chk_lib_dry_run.isChecked(),
+            phases={PHASE_MIRROR},
+            only_rel_paths=selected_paths,
+        )
+    
+    def _on_select_all_missing(self) -> None:
+        """Select all files with missing status in the table."""
+        if self._current_view_mode == "Side-by-Side":
+            # Select in source table
+            self.sbs_source_table.clearSelection()
+            selection_model = self.sbs_source_table.selectionModel()
+            for row in range(self.sbs_source_model.rowCount()):
+                cf = self.sbs_source_model.get_file_at(row)
+                if cf and cf.sync_status == SyncStatus.MISSING:
+                    index = self.sbs_source_model.index(row, 0)
+                    selection_model.select(index, QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+        else:
+            # Select in main browser table
+            self.browser_table.clearSelection()
+            selection_model = self.browser_table.selectionModel()
+            model = self.browser_proxy_model.sourceModel()
+            if isinstance(model, CorrelatedTableModel):
+                for row in range(model.rowCount()):
+                    cf = model.get_file_at(row)
+                    if cf and cf.sync_status == SyncStatus.MISSING:
+                        source_index = model.index(row, 0)
+                        proxy_index = self.browser_proxy_model.mapFromSource(source_index)
+                        if proxy_index.isValid():
+                            selection_model.select(proxy_index, QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+    
+    def _on_action_recompress(self) -> None:
+        """Run FLAC recompression on library."""
+        lib_root = self.edit_lib_root.text().strip()
+        if not lib_root or not Path(lib_root).exists():
+            QtWidgets.QMessageBox.warning(self, "Missing Library Root", "Please select a valid FLAC library.")
+            return
+        
+        logger.info("Running FLAC recompression")
+        self._start_lib_operation(dry_run=self.chk_lib_dry_run.isChecked(), phases={PHASE_RECOMPRESS})
+    
+    def _on_action_extract_art(self) -> None:
+        """Extract artwork from library."""
+        lib_root = self.edit_lib_root.text().strip()
+        if not lib_root or not Path(lib_root).exists():
+            QtWidgets.QMessageBox.warning(self, "Missing Library Root", "Please select a valid FLAC library.")
+            return
+        
+        logger.info("Extracting artwork")
+        self._start_lib_operation(dry_run=self.chk_lib_dry_run.isChecked(), phases={PHASE_ARTWORK})
+    
+    def _on_action_resample(self) -> None:
+        """Resample hi-res files to CD quality."""
+        lib_root = self.edit_lib_root.text().strip()
+        if not lib_root or not Path(lib_root).exists():
+            QtWidgets.QMessageBox.warning(self, "Missing Library Root", "Please select a valid FLAC library.")
+            return
+        
+        logger.info("Resampling hi-res to CD quality")
+        self._start_lib_operation(dry_run=self.chk_lib_dry_run.isChecked(), phases={PHASE_RESAMPLE})
+    
+    def _on_action_adopt_legacy(self) -> None:
+        """Adopt legacy files without PAC tags."""
+        self._start_adopt_operation()
+    
+    def _get_selected_source_paths(self) -> list:
+        """Get list of selected source file paths from current view."""
+        paths = []
+        if self._current_view_mode == "Side-by-Side":
+            indexes = self.sbs_source_table.selectionModel().selectedRows()
+            for idx in indexes:
+                cf = self.sbs_source_model.get_file_at(idx.row())
+                if cf and cf.source:
+                    paths.append(str(cf.source.rel_path))
+        else:
+            indexes = self.browser_table.selectionModel().selectedRows()
+            model = self.browser_proxy_model.sourceModel()
+            for idx in indexes:
+                source_idx = self.browser_proxy_model.mapToSource(idx)
+                if isinstance(model, CorrelatedTableModel):
+                    cf = model.get_file_at(source_idx.row())
+                    if cf and cf.source:
+                        paths.append(str(cf.source.rel_path))
+                elif isinstance(model, LibraryTableModel):
+                    f = model.get_file_at(source_idx.row())
+                    if f:
+                        paths.append(str(f.rel_path))
+        return paths
     
     def _get_lib_settings_overrides(self) -> dict:
         """Get library settings from cache or defaults."""
@@ -1918,8 +2168,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.adopt_worker.finished.connect(self._reenable_lib_ui)
         self.adopt_worker.start()
 
-    def _start_lib_operation(self, *, dry_run: bool, phases: Optional[set] = None) -> None:
-        """Start library operation with specified phases."""
+    def _start_lib_operation(self, *, dry_run: bool, phases: Optional[set] = None, only_rel_paths: Optional[list] = None) -> None:
+        """Start library operation with specified phases.
+        
+        Args:
+            dry_run: If True, only preview changes without modifying files
+            phases: Set of phases to run (e.g., {PHASE_MIRROR, PHASE_INTEGRITY})
+            only_rel_paths: Optional list of relative paths to operate on (for selection-based operations)
+        """
         lib_root = self.edit_lib_root.text().strip()
         if not lib_root or not Path(lib_root).exists():
             QtWidgets.QMessageBox.warning(self, "Missing Library Root", "Please select a valid FLAC library root directory")
@@ -1927,9 +2183,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mirror_out = self.edit_mirror_out.text().strip() if self.edit_mirror_out.text().strip() else None
 
-        # Determine scope: gather selected file paths if "Selection Only" is chosen
-        only_rel_paths = None
-        if self.radio_scope_selection.isChecked():
+        # If no paths provided, check legacy scope radio buttons
+        if only_rel_paths is None and self.radio_scope_selection.isChecked():
             indexes = self.browser_table.selectionModel().selectedRows()
             if not indexes:
                 QtWidgets.QMessageBox.warning(
@@ -1943,7 +2198,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 f = self.browser_model.get_file_at(source_idx.row())
                 if f:
                     only_rel_paths.append(str(f.rel_path))
-            logger.info(f"Running on selection: {len(only_rel_paths)} files")
+        
+        if only_rel_paths:
+            logger.info(f"Running on {len(only_rel_paths)} files")
 
         # Update settings with library-specific values from modal dialog cache
         lib_overrides = self._get_lib_settings_overrides()
@@ -2294,34 +2551,62 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stat_needs_recompress.setText(f"Needs Recompress: {analysis.needs_recompress_count}")
         self.btn_stat_legacy.setText(f"Legacy: {analysis.legacy_count}")
         
-        # Show all stat buttons for source view
+        # Show source-only stats, hide sync-status stats
         self.btn_stat_hires.show()
         self.btn_stat_integrity_unknown.show()
         self.btn_stat_integrity_failed.show()
         self.btn_stat_needs_recompress.show()
         self.btn_stat_legacy.show()
+        self.btn_stat_synced.hide()
+        self.btn_stat_missing.hide()
+        self.btn_stat_outdated.hide()
+        self.btn_stat_orphan.hide()
+        
+        # Disable convert buttons in source-only view (no mirror context)
+        self.btn_convert_missing.setEnabled(False)
+        self.btn_convert_missing.setText("Convert Missing")
+        self.btn_sync_outdated.setEnabled(False)
+        self.btn_sync_outdated.setText("Sync Outdated")
+        self.btn_select_all_missing.hide()
 
     def _update_correlated_statistics(self, analysis: CorrelatedAnalysis) -> None:
         """Update the statistics bar for correlated view."""
         total = len(analysis.files)
+        missing_count = analysis.missing_count
+        outdated_count = analysis.outdated_count
+        synced_count = analysis.synced_count
+        orphan_count = analysis.orphan_count
+        
+        # Update new stats bar buttons
         self.btn_stat_total.setText(f"Total: {total}")
-        self.btn_stat_hires.setText(f"Synced: {analysis.synced_count}")
-        self.btn_stat_integrity_unknown.setText(f"Outdated: {analysis.outdated_count}")
-        self.btn_stat_integrity_failed.setText(f"Missing: {analysis.missing_count}")
-        self.btn_stat_needs_recompress.setText(f"Orphan: {analysis.orphan_count}")
+        self.btn_stat_synced.setText(f"Synced: {synced_count}")
+        self.btn_stat_missing.setText(f"Missing: {missing_count}")
+        self.btn_stat_outdated.setText(f"Outdated: {outdated_count}")
+        self.btn_stat_orphan.setText(f"Orphan: {orphan_count}")
         
-        # Hide legacy button in correlated view, repurpose others
+        # Show sync-status stats, hide source-only stats
+        self.btn_stat_synced.show()
+        self.btn_stat_missing.show()
+        self.btn_stat_outdated.show()
+        self.btn_stat_orphan.show()
+        self.btn_stat_hires.hide()
+        self.btn_stat_integrity_unknown.hide()
+        self.btn_stat_integrity_failed.hide()
+        self.btn_stat_needs_recompress.hide()
         self.btn_stat_legacy.hide()
-        self.btn_stat_hires.show()
-        self.btn_stat_integrity_unknown.show()
-        self.btn_stat_integrity_failed.show()
-        self.btn_stat_needs_recompress.show()
         
-        # Update tooltips for repurposed buttons
-        self.btn_stat_hires.setToolTip("Filter synced files")
-        self.btn_stat_integrity_unknown.setToolTip("Filter outdated files")
-        self.btn_stat_integrity_failed.setToolTip("Filter missing files")
-        self.btn_stat_needs_recompress.setToolTip("Filter orphaned outputs")
+        # Enable/disable action buttons based on counts
+        has_missing = missing_count > 0
+        has_outdated = outdated_count > 0
+        
+        self.btn_convert_missing.setEnabled(has_missing)
+        self.btn_convert_missing.setText(f"Convert Missing ({missing_count})" if has_missing else "Convert Missing")
+        
+        self.btn_sync_outdated.setEnabled(has_outdated)
+        self.btn_sync_outdated.setText(f"Sync Outdated ({outdated_count})" if has_outdated else "Sync Outdated")
+        
+        # Show select all missing button if there are missing files
+        self.btn_select_all_missing.setVisible(has_missing)
 
     def _on_browser_filter_change(self, filter_text: str) -> None:
         """Handle filter combobox change."""
@@ -2394,14 +2679,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # === SIDE-BY-SIDE SELECTION AND SCROLL SYNC ===
     def _on_sbs_source_selection_changed(self) -> None:
-        """Handle selection change in source (left) panel - sync to mirror."""
+        """Handle selection change in source (left) panel - update UI and sync to mirror."""
         if self._sbs_sync_in_progress:
             return
         
         indexes = self.sbs_source_table.selectionModel().selectedRows()
+        count = len(indexes)
+        
+        # Update selection label and action buttons
+        if count == 0:
+            self.lbl_browser_selection.setText("Select files to convert or check")
+            self.btn_convert_selected.hide()
+            self.btn_browser_run_integrity.hide()
+        elif count == 1:
+            cf = self.sbs_source_model.get_file_at(indexes[0].row())
+            if cf:
+                self.lbl_browser_selection.setText(f"Selected: {cf.display_path}")
+            self.btn_convert_selected.setText(f"Convert Selected")
+            self.btn_convert_selected.setEnabled(True)
+            self.btn_convert_selected.show()
+            self.btn_browser_run_integrity.setText("Check Selected")
+            self.btn_browser_run_integrity.setEnabled(True)
+            self.btn_browser_run_integrity.show()
+        else:
+            self.lbl_browser_selection.setText(f"Selected: {count} files")
+            self.btn_convert_selected.setText(f"Convert Selected ({count})")
+            self.btn_convert_selected.setEnabled(True)
+            self.btn_convert_selected.show()
+            self.btn_browser_run_integrity.setText(f"Check Selected ({count})")
+            self.btn_browser_run_integrity.setEnabled(True)
+            self.btn_browser_run_integrity.show()
+        
         if not indexes:
             return
         
+        # Sync selection to mirror panel (only first selected item)
         self._sbs_sync_in_progress = True
         try:
             row = indexes[0].row()
@@ -2420,9 +2732,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     # No counterpart - clear mirror selection
                     self.sbs_mirror_table.selectionModel().clearSelection()
-                
-                # Update selection label
-                self.lbl_browser_selection.setText(f"Selected: {cf.display_path}")
         finally:
             self._sbs_sync_in_progress = False
     
