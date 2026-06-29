@@ -19,7 +19,6 @@ from loguru import logger
 from .config import PacSettings
 from .db import PacDB
 from .scanner import SourceFile, read_flac_streaminfo_md5
-from .flac_tools import flac_stream_info, needs_cd_downmix, get_flac_tag
 from .metadata import read_pac_tags
 
 
@@ -308,15 +307,22 @@ def _analyze_single_file(
     db: Optional[PacDB],
 ) -> Optional[AnalyzedFile]:
     """Analyze a single FLAC file."""
+    import re
+    from mutagen.flac import FLAC
+    
     try:
         rel_path = path.relative_to(root)
         stat = path.stat()
         
-        # Read FLAC MD5 from STREAMINFO
+        # Read FLAC MD5 from STREAMINFO (fast binary read)
         flac_md5 = read_flac_streaminfo_md5(path)
         
-        # Get stream info
-        info = flac_stream_info(path)
+        # Open FLAC file once with mutagen for all metadata
+        try:
+            flac_obj = FLAC(str(path))
+        except Exception as e:
+            logger.warning(f"Failed to open FLAC {path}: {e}")
+            return None
         
         result = AnalyzedFile(
             path=path,
@@ -325,17 +331,21 @@ def _analyze_single_file(
             flac_md5=flac_md5,
         )
         
-        if info:
-            result.bit_depth = info.get("bit_depth")
-            result.sample_rate = info.get("sample_rate")
-            result.channels = info.get("channels")
-            result.is_hires = needs_cd_downmix(info)
+        # Extract stream info from mutagen object
+        if flac_obj.info:
+            result.bit_depth = flac_obj.info.bits_per_sample
+            result.sample_rate = flac_obj.info.sample_rate
+            result.channels = flac_obj.info.channels
+            result.is_hires = (
+                (result.bit_depth or 16) > 16 or
+                (result.sample_rate or 44100) != 44100 or
+                (result.channels or 2) != 2
+            )
         
-        # Check compression tag
-        compression_tag = get_flac_tag(path, "COMPRESSION")
+        # Check compression tag from mutagen (no subprocess!)
+        compression_tag = flac_obj.tags.get("COMPRESSION", [None])[0] if flac_obj.tags else None
         if compression_tag:
             result.compression_tag = compression_tag
-            import re
             match = re.search(r'level=(\d+)', compression_tag)
             if match:
                 result.compression_level = int(match.group(1))
@@ -344,14 +354,9 @@ def _analyze_single_file(
         if result.compression_level is None or result.compression_level != cfg.flac_target_compression:
             result.needs_recompress = True
         
-        # Check embedded artwork
-        try:
-            from mutagen.flac import FLAC
-            flac_obj = FLAC(str(path))
-            if flac_obj and flac_obj.pictures:
-                result.has_embedded_art = True
-        except Exception:
-            pass
+        # Check embedded artwork from same mutagen object
+        if flac_obj.pictures:
+            result.has_embedded_art = True
         
         # Check database for integrity status
         if db and flac_md5:
